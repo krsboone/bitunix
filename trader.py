@@ -236,6 +236,27 @@ def run(debug: bool) -> None:
     # Track open positions: symbol → {position_id, side, entry_price, opened_at, qty, debug}
     tracked: dict[str, dict] = {}
 
+    # ── Hydrate from any positions already open on the exchange ───────────────
+    if not debug:
+        existing = get_open_positions(client)
+        for p in existing:
+            sym = p.get("symbol")
+            if sym not in SYMBOLS:
+                continue
+            side = "LONG" if p.get("side", "").upper() == "LONG" else "SHORT"
+            tracked[sym] = {
+                "position_id": p.get("positionId"),
+                "side":        side,
+                "entry_price": float(p.get("avgOpenPrice", 0)),
+                "qty":         float(p.get("qty", 0)),
+                "opened_at":   now_utc(),   # exact open time unknown; use now conservatively
+                "debug":       False,
+            }
+            log.info(f"  Hydrated {sym} [{side}]  "
+                     f"pos={p.get('positionId')}  "
+                     f"entry={tracked[sym]['entry_price']:.4f}  "
+                     f"qty={tracked[sym]['qty']}")
+
     while True:
         try:
             cycle_start = now_utc()
@@ -366,6 +387,16 @@ def run(debug: bool) -> None:
 
                 except Exception as e:
                     log.error(f"  {sym} scan error: {e}")
+
+            # ── Refresh reference balance when flat ───────────────────────────
+            if not tracked:
+                new_balance = get_balance(client)
+                if new_balance != start_balance:
+                    start_balance = new_balance
+                    min_balance   = start_balance * MIN_BALANCE_PCT
+                    log.info(f"  Flat — reference balance updated: "
+                             f"{start_balance:.4f} USDT  |  "
+                             f"Circuit floor: {min_balance:.4f} USDT")
 
         except Exception as e:
             log.error(f"  Cycle error: {e}")
