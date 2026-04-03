@@ -277,12 +277,22 @@ def run(debug: bool) -> None:
 
                 if pos_info.get("debug"):
                     # Debug position — no real API state, track by time only
+                    ticker_now  = fetch_ticker(client, sym)
+                    close_price = float(ticker_now.get("lastPrice", 0))
+                    pnl_est     = (close_price - pos_info["entry_price"]) * pos_info["qty"]
+                    if pos_info["side"] == "SHORT":
+                        pnl_est = -pnl_est
                     log.info(f"  {sym} [DEBUG {pos_info['side']}]  "
                              f"qty={pos_info['qty']}  "
                              f"entry={pos_info['entry_price']:.4f}  "
+                             f"now={close_price:.4f}  "
+                             f"uPnL≈{pnl_est:+.4f}  "
                              f"held={held_mins:.1f}min")
                     if held_mins >= MAX_HOLD_MINS:
-                        log.info(f"  {sym} [DEBUG] time exit after {held_mins:.1f}min")
+                        log.info(f"  {sym} [DEBUG] time exit after {held_mins:.1f}min  "
+                                 f"entry={pos_info['entry_price']:.4f}  "
+                                 f"close≈{close_price:.4f}  "
+                                 f"PnL≈{pnl_est:+.4f}")
                         del tracked[sym]
                     continue
 
@@ -306,7 +316,12 @@ def run(debug: bool) -> None:
 
                 # Time-based exit
                 if held_mins >= MAX_HOLD_MINS:
-                    log.info(f"  {sym} time exit after {held_mins:.1f}min")
+                    mark_price = float(p.get("markPrice", 0)) or float(p.get("avgOpenPrice", 0))
+                    pnl_live   = float(p.get("unrealizedPNL", 0))
+                    log.info(f"  {sym} time exit after {held_mins:.1f}min  "
+                             f"entry={pos_info['entry_price']:.4f}  "
+                             f"close≈{mark_price:.4f}  "
+                             f"uPnL={pnl_live:+.4f}")
                     if close_position(client, pos_info["position_id"], sym, debug):
                         del tracked[sym]
 
