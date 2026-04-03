@@ -337,20 +337,27 @@ def run(debug: bool) -> None:
                         log.info(f"  {sym}  qty {qty} below minimum {min_qty}, skip")
                         continue
 
-                    # TP / SL prices — TP extended by round-trip fee so profit
-                    # target is net of entry (taker) + exit (maker) costs
-                    sigma_hold  = sig * math.sqrt(HOLD_INTERVALS)
-                    fee_offset  = price * ROUND_TRIP_FEE
+                    # TP / SL prices — set purely from signal, no fee inflation
+                    sigma_hold   = sig * math.sqrt(HOLD_INTERVALS)
+                    tp_move      = price * sigma_hold * TP_MULT
+                    fee_cost     = price * ROUND_TRIP_FEE
+
+                    # Fee gate: skip if expected profit doesn't cover round-trip cost
+                    if tp_move <= fee_cost:
+                        log.info(f"  {sym}  SKIP — expected profit {tp_move:.4f} "
+                                 f"≤ fee cost {fee_cost:.4f}")
+                        continue
+
                     if side == "LONG":
-                        tp_price = price + price * sigma_hold * TP_MULT + fee_offset
+                        tp_price = price + tp_move
                         sl_price = price - price * sigma_hold * SL_MULT
                     else:
-                        tp_price = price - price * sigma_hold * TP_MULT - fee_offset
+                        tp_price = price - tp_move
                         sl_price = price + price * sigma_hold * SL_MULT
 
                     log.info(f"  {sym}  SIGNAL {side}  z={z:+.3f}  "
                              f"qty={qty}  TP={tp_price:.4f}  SL={sl_price:.4f}  "
-                             f"fee_offset={fee_offset:.4f}")
+                             f"expected={tp_move:.4f}  fee={fee_cost:.4f}")
 
                     order_id = place_order(client, sym, side, qty,
                                            tp_price, sl_price, debug)
