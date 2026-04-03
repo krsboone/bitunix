@@ -33,7 +33,7 @@ start_logging("trader")
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-SYMBOLS        = ["BTCUSDT", "ETHUSDT"]
+SYMBOLS        = ["BTCUSDT", "ETHUSDT", "RIVERUSDT"]
 LEVERAGE       = 2
 MARGIN_COIN    = "USDT"
 INTERVAL       = "1m"          # candle interval
@@ -57,8 +57,9 @@ MIN_BALANCE_PCT = 0.70         # halt trading if balance drops below 70% of star
 
 # Symbol precision (from trading_pairs endpoint)
 PRECISION = {
-    "BTCUSDT": {"qty": 4, "price": 1},
-    "ETHUSDT": {"qty": 3, "price": 2},
+    "BTCUSDT":   {"qty": 4, "price": 1},
+    "ETHUSDT":   {"qty": 3, "price": 2},
+    "RIVERUSDT": {"qty": 2, "price": 3},
 }
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -332,7 +333,7 @@ def run(debug: bool) -> None:
                     # Position sizing
                     notional = balance * MAX_TRADE_PCT * LEVERAGE
                     qty = round_qty(sym, notional / price)
-                    min_qty = {"BTCUSDT": 0.0001, "ETHUSDT": 0.003}.get(sym, 0.001)
+                    min_qty = {"BTCUSDT": 0.0001, "ETHUSDT": 0.003, "RIVERUSDT": 0.5}.get(sym, 0.001)
                     if qty < min_qty:
                         log.info(f"  {sym}  qty {qty} below minimum {min_qty}, skip")
                         continue
