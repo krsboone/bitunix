@@ -29,10 +29,12 @@ def _timestamp_ms() -> str:
 
 
 def _serialize_params(params: dict) -> str:
-    """Sort params by key, concatenate values only (Bitunix convention)."""
+    """Sort params by key, concatenate key+value with no separator.
+    e.g. {uid: 200, id: 1} → 'id1uid200'  (Bitunix convention)
+    """
     if not params:
         return ""
-    return "".join(str(v) for k, v in sorted(params.items()))
+    return "".join(str(k) + str(v) for k, v in sorted(params.items()))
 
 
 def _sign(api_key: str, secret_key: str, nonce: str, timestamp: str,
