@@ -27,6 +27,9 @@ from datetime import datetime, timezone
 from auth import BitunixClient
 from config import API_KEY, SECRET_KEY
 from market import fetch_candles, fetch_ticker, compute_sigma
+from log_cap import start_logging
+
+start_logging("trader")
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
