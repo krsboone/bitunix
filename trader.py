@@ -47,6 +47,14 @@ MAX_HOLD_MINS  = 30            # time-based exit after this many minutes
 MAX_TRADE_PCT  = 0.20          # max 20% of available balance per trade
 POLL_SECS      = 30            # seconds between scan cycles
 
+# ── Fee configuration (update as your tier improves) ──────────────────────────
+FEE_TAKER      = 0.00060       # market order entry fee (0.060%)
+FEE_MAKER      = 0.00020       # limit order exit fee  (0.020%)
+ROUND_TRIP_FEE = FEE_TAKER + FEE_MAKER   # 0.080% total
+
+# ── Circuit breaker ───────────────────────────────────────────────────────────
+MIN_BALANCE_PCT = 0.70         # halt trading if balance drops below 70% of start
+
 # Symbol precision (from trading_pairs endpoint)
 PRECISION = {
     "BTCUSDT": {"qty": 4, "price": 1},
@@ -208,6 +216,9 @@ def run(debug: bool) -> None:
     log.info(f"  Leverage  : {LEVERAGE}×  |  Max trade : {MAX_TRADE_PCT:.0%}")
     log.info(f"  Z-entry   : {Z_ENTRY}  |  TP/SL mult: {TP_MULT}/{SL_MULT}σ")
     log.info(f"  Hold      : ≤{MAX_HOLD_MINS}min  |  Candles  : {SIGMA_CANDLES}×{INTERVAL}")
+    log.info(f"  Fees      : taker {FEE_TAKER*100:.3f}%  maker {FEE_MAKER*100:.3f}%  "
+             f"round-trip {ROUND_TRIP_FEE*100:.3f}%")
+    log.info(f"  Circuit   : halt if balance < {MIN_BALANCE_PCT:.0%} of start")
     if debug:
         log.info("  MODE      : DEBUG — no real orders will be placed")
     log.info("━" * 60)
@@ -216,7 +227,13 @@ def run(debug: bool) -> None:
     for sym in SYMBOLS:
         set_leverage(client, sym, debug)
 
-    # Track open positions: symbol → {position_id, side, entry_price, opened_at, qty}
+    # Record starting balance for circuit breaker
+    start_balance = get_balance(client)
+    min_balance   = start_balance * MIN_BALANCE_PCT
+    log.info(f"  Starting balance: {start_balance:.4f} USDT  |  "
+             f"Circuit floor: {min_balance:.4f} USDT")
+
+    # Track open positions: symbol → {position_id, side, entry_price, opened_at, qty, debug}
     tracked: dict[str, dict] = {}
 
     while True:
@@ -225,17 +242,33 @@ def run(debug: bool) -> None:
             balance = get_balance(client)
             log.info(f"  Balance: {balance:.4f} USDT  |  {cycle_start.strftime('%H:%M:%S')} UTC")
 
+            # ── Circuit breaker ────────────────────────────────────────────────
+            if balance < min_balance:
+                log.warning(f"  CIRCUIT BREAKER: balance {balance:.4f} < floor "
+                            f"{min_balance:.4f} — halting")
+                break
+
             # ── Monitor existing positions ─────────────────────────────────────
             for sym in list(tracked.keys()):
-                pos_info = tracked[sym]
+                pos_info  = tracked[sym]
                 held_mins = (now_utc() - pos_info["opened_at"]).total_seconds() / 60
 
-                # Refresh position from API
+                if pos_info.get("debug"):
+                    # Debug position — no real API state, track by time only
+                    log.info(f"  {sym} [DEBUG {pos_info['side']}]  "
+                             f"qty={pos_info['qty']}  "
+                             f"entry={pos_info['entry_price']:.4f}  "
+                             f"held={held_mins:.1f}min")
+                    if held_mins >= MAX_HOLD_MINS:
+                        log.info(f"  {sym} [DEBUG] time exit after {held_mins:.1f}min")
+                        del tracked[sym]
+                    continue
+
+                # Live position — refresh from API
                 live = [p for p in get_open_positions(client, sym)
                         if p.get("positionId") == pos_info["position_id"]]
 
                 if not live:
-                    # Position closed (TP or SL hit)
                     log.info(f"  {sym} position {pos_info['position_id']} closed "
                              f"(TP/SL hit or filled)")
                     del tracked[sym]
@@ -283,17 +316,20 @@ def run(debug: bool) -> None:
                         log.info(f"  {sym}  qty {qty} below minimum {min_qty}, skip")
                         continue
 
-                    # TP / SL prices
-                    sigma_hold = sig * math.sqrt(HOLD_INTERVALS)
+                    # TP / SL prices — TP extended by round-trip fee so profit
+                    # target is net of entry (taker) + exit (maker) costs
+                    sigma_hold  = sig * math.sqrt(HOLD_INTERVALS)
+                    fee_offset  = price * ROUND_TRIP_FEE
                     if side == "LONG":
-                        tp_price = price + price * sigma_hold * TP_MULT
+                        tp_price = price + price * sigma_hold * TP_MULT + fee_offset
                         sl_price = price - price * sigma_hold * SL_MULT
                     else:
-                        tp_price = price - price * sigma_hold * TP_MULT
+                        tp_price = price - price * sigma_hold * TP_MULT - fee_offset
                         sl_price = price + price * sigma_hold * SL_MULT
 
                     log.info(f"  {sym}  SIGNAL {side}  z={z:+.3f}  "
-                             f"qty={qty}  TP={tp_price:.4f}  SL={sl_price:.4f}")
+                             f"qty={qty}  TP={tp_price:.4f}  SL={sl_price:.4f}  "
+                             f"fee_offset={fee_offset:.4f}")
 
                     order_id = place_order(client, sym, side, qty,
                                            tp_price, sl_price, debug)
@@ -308,6 +344,7 @@ def run(debug: bool) -> None:
                             "entry_price": price,
                             "qty":         qty,
                             "opened_at":   now_utc(),
+                            "debug":       True,
                         }
                         continue
 
