@@ -18,9 +18,11 @@ Usage:
 """
 
 import argparse
+import csv
 import json
 import logging
 import math
+import os
 import time
 from datetime import datetime, timezone
 
@@ -155,6 +157,30 @@ def entry_signal(candles: list) -> tuple[str | None, float, float]:
     return None, z, sigma
 
 
+# ── Trade CSV logger ─────────────────────────────────────────────────────────
+
+TRADE_CSV = os.path.join("log", "trades.csv")
+
+def log_trade_csv(body: dict) -> None:
+    """Append one row to log/trades.csv in backtest-compatible format."""
+    os.makedirs("log", exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    row = [
+        ts, ts,
+        "symbol",    body["symbol"],
+        "qty",       body["qty"],
+        "side",      body["side"],
+        "orderType", body["orderType"],
+        "tradeSide", body["tradeSide"],
+        "tpPrice",   body["tpPrice"],
+        "slPrice",   body["slPrice"],
+        "tpStopType", body["tpStopType"],
+        "slStopType", body["slStopType"],
+    ]
+    with open(TRADE_CSV, "a", newline="") as f:
+        csv.writer(f).writerow(row)
+
+
 # ── Order placement ───────────────────────────────────────────────────────────
 
 def place_order(client: BitunixClient, symbol: str, side: str,
@@ -177,6 +203,8 @@ def place_order(client: BitunixClient, symbol: str, side: str,
         "tpStopType":  "MARK_PRICE",
         "slStopType":  "MARK_PRICE",
     }
+
+    log_trade_csv(body)
 
     if debug:
         log.info(f"  [DEBUG] Would place order: {json.dumps(body)}")

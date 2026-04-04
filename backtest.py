@@ -32,8 +32,8 @@ def parse_row(row: list[str]) -> dict | None:
             idx = fields.index(key)
             return fields[idx + 1]
 
-        raw_ts = fields[0].strip()  # e.g. "2026-04-0318:28:22"
-        # Insert missing space between date and time if absent
+        raw_ts = fields[0].strip()
+        # Handle compact format "2026-04-0318:28:22" (len 18, no space)
         if len(raw_ts) == 18 and " " not in raw_ts:
             raw_ts = raw_ts[:10] + " " + raw_ts[10:]
         entry_time = datetime.strptime(raw_ts, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
