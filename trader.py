@@ -35,7 +35,8 @@ start_logging("trader")
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-SYMBOLS        = ["BTCUSDT", "ETHUSDT", "RIVERUSDT"]
+#SYMBOLS        = ["BTCUSDT", "ETHUSDT", "RIVERUSDT"]
+SYMBOLS        = ["BTCUSDT", "ETHUSDT"]
 LEVERAGE       = 2
 MARGIN_COIN    = "USDT"
 INTERVAL       = "1m"          # candle interval
@@ -45,13 +46,15 @@ Z_ENTRY        = 1.2           # Z-score threshold to trigger entry
 TP_MULT        = 1.5           # TP distance = TP_MULT × sigma × sqrt(hold)
 SL_MULT        = 2.0           # SL distance = SL_MULT × sigma × sqrt(hold)
 HOLD_INTERVALS = 15            # expected hold in candle-lengths (15 min at 1m)
-MAX_HOLD_MINS  = 30            # time-based exit after this many minutes
+#MAX_HOLD_MINS  = 30            # time-based exit after this many minutes
+MAX_HOLD_MINS  = 33            # time-based exit after this many minutes
 MAX_TRADE_PCT  = 0.20          # max 20% of available balance per trade
 POLL_SECS      = 30            # seconds between scan cycles
 
 # ── Fee configuration (update as your tier improves) ──────────────────────────
 FEE_TAKER      = 0.00060       # market order entry fee (0.060%)
-FEE_MAKER      = 0.00020       # limit order exit fee  (0.020%)
+#FEE_MAKER      = 0.00020       # limit order exit fee  (0.020%)
+FEE_MAKER      = 0.00060       # market order exit fee  (0.060%)
 ROUND_TRIP_FEE = FEE_TAKER + FEE_MAKER   # 0.080% total
 
 # ── Circuit breaker ───────────────────────────────────────────────────────────
@@ -272,7 +275,7 @@ def run(debug: bool) -> None:
             sym = p.get("symbol")
             if sym not in SYMBOLS:
                 continue
-            side = "LONG" if p.get("side", "").upper() == "LONG" else "SHORT"
+            side = "LONG" if p.get("side", "").upper() == "BUY" else "SHORT"
             tracked[sym] = {
                 "position_id": p.get("positionId"),
                 "side":        side,
