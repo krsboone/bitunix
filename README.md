@@ -85,6 +85,26 @@ python3 trend_trader.py --debug    # simulate — no real orders
 python3 trend_trader.py            # live trading
 ```
 
+### `follow_trader.py` — Follow-the-Trend Strategy
+Refines the trend line approach by using slope direction to set trade bias and price position relative to the line as an entry condition. Only enters when price has pulled back to or through the line in the trend direction — a mean-reversion-to-trend setup rather than a momentum gate.
+
+**Trend bias (differs from trend_trader.py):**
+- Rising slope → LONG signals only
+- Falling slope → SHORT signals only
+
+**Entry conditions (both must pass):**
+- Z-score must confirm the bias direction (same as other strategies)
+- Price must be at or through the trend line:
+  - LONG entries: `price ≤ trend line` (pulled back into uptrend)
+  - SHORT entries: `price ≥ trend line` (bounced up into downtrend)
+
+This produces fewer but higher-conviction entries — only taking trades where price has returned to the trend line and momentum is resuming in the trend direction.
+
+```bash
+python3 follow_trader.py --debug    # simulate — no real orders
+python3 follow_trader.py            # live trading
+```
+
 ### `backtest.py`
 Replays recorded trade signals against historical 1-minute candles to determine whether TP, SL, or the time limit would have been hit first. Both traders write to their own CSV automatically — no manual steps required.
 
