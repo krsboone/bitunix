@@ -43,12 +43,13 @@ DATA_DIR       = "data"
 INTERVAL       = "1m"
 
 # S/R level detection
+# Per-symbol sweep winners: BTC arm=0.0015 break=0.001 vm=2.0 | ETH arm=0.003 break=0.0015 vm=3.0
 ARM_DISTANCE   = 0.0020   # arm when price within 0.20% of a level
 BREAKOUT_PCT   = 0.0010   # confirm when candle close is 0.10% beyond level
 ROLLING_4H     = 240      # 1m candles in 4 hours
 
 # Volume confirmation
-VOL_MULT       = 1.5      # volume must be VOL_MULT × rolling average to confirm
+VOL_MULT       = 2.0      # volume must be VOL_MULT × rolling average to confirm
 VOL_LOOKBACK   = 20       # candles for rolling volume average
 
 # Entry signal (Z-score)
@@ -56,9 +57,9 @@ SIGMA_CANDLES  = 20
 SIGNAL_CANDLES = 5
 Z_ENTRY        = 1.2
 
-# Trade management
-TP_MULT        = 1.5
-SL_MULT        = 2.0
+# Trade management — tp/sl sweep winners: both symbols agree tp=1.0 sl=3.0
+TP_MULT        = 1.0
+SL_MULT        = 3.0
 HOLD_INTERVALS = 15       # for sigma_hold calculation (1.5σ√15)
 MAX_HOLD_MINS  = 33
 
