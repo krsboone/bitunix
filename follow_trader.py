@@ -2,7 +2,7 @@
 follow_trader.py — Bitunix trend-following perpetual futures trader
 
 Strategy:
-  1. Compute a projection trend line from daily candles over LOOKBACK_DAYS:
+  1. Compute a projection trend line from 2-hour candles over LOOKBACK periods:
        - Point 1: avg open of first 5 candles  (start of range)
        - Point 2: avg close of last 5 candles  (end of range)
        - Point 3: avg (high+low)/2 of middle 5 candles (midpoint)
@@ -51,9 +51,9 @@ SYMBOLS        = ["BTCUSDT", "ETHUSDT", "RIVERUSDT"]
 LEVERAGE       = 2
 MARGIN_COIN    = "USDT"
 
-# Trend line (daily candles)
-#LOOKBACK_DAYS  = 30            # daily candles to analyse
-LOOKBACK_DAYS  = 15            # daily candles to analyse
+# Trend line (2-hour candles)
+TREND_INTERVAL = "2h"          # candle size for trend line
+LOOKBACK       = 15            # candles to analyse
 TREND_CANDLES  = 5             # candles at each anchor point
 
 # Entry signal (1-min candles)
@@ -162,29 +162,29 @@ def set_leverage(client: BitunixClient, symbol: str, debug: bool) -> None:
 
 def compute_trend_line(client: BitunixClient, symbol: str) -> dict | None:
     """
-    Fetch LOOKBACK_DAYS daily candles and compute the projection trend line
+    Fetch LOOKBACK 2-hour candles and compute the projection trend line
     matching the Pine Script methodology:
       - P1: avg open of first TREND_CANDLES candles
       - P2: avg close of last TREND_CANDLES candles
       - P3: avg (high+low)/2 of middle TREND_CANDLES candles
-      - slope = (P2 - P1) / LOOKBACK_DAYS
+      - slope = (P2 - P1) / LOOKBACK
       - intercept averaged from P1 and P2 ends, then adjusted 30% toward P3
 
     Returns dict with slope, intercept_adjusted, and projected current value.
     """
     resp = client.get("/api/v1/futures/market/kline", {
         "symbol":   symbol,
-        "interval": "1d",
-        "limit":    str(LOOKBACK_DAYS + 2),
+        "interval": TREND_INTERVAL,
+        "limit":    str(LOOKBACK + 2),
     })
     if resp.get("code") != 0:
         return None
 
     candles = sorted(resp.get("data", []), key=lambda c: int(c.get("time", 0)))
-    if len(candles) < LOOKBACK_DAYS:
+    if len(candles) < LOOKBACK:
         return None
 
-    candles = candles[-LOOKBACK_DAYS:]
+    candles = candles[-LOOKBACK:]
     n       = len(candles)
 
     p1_price = sum(float(candles[i]["open"]) for i in range(TREND_CANDLES)) / TREND_CANDLES
@@ -295,7 +295,7 @@ def run(debug: bool, symbols: list[str] = None) -> None:
     log.info("  Bitunix Follow-the-Trend Trader")
     log.info(f"  Symbols    : {', '.join(active_symbols)}")
     log.info(f"  Leverage   : {LEVERAGE}×  |  Max trade : {MAX_TRADE_PCT:.0%}")
-    log.info(f"  Trend line : {LOOKBACK_DAYS}d lookback  |  Z-entry : {Z_ENTRY}")
+    log.info(f"  Trend line : {LOOKBACK}×{TREND_INTERVAL} lookback  |  Z-entry : {Z_ENTRY}")
     log.info(f"  TP/SL      : {TP_MULT}/{SL_MULT}σ  |  Hold : ≤{MAX_HOLD_MINS}min")
     log.info(f"  Fees       : taker {FEE_TAKER*100:.3f}%  maker {FEE_MAKER*100:.3f}%  "
              f"round-trip {ROUND_TRIP_FEE*100:.3f}%")
