@@ -102,36 +102,56 @@ def run_sim(fixed_args: list[str], sweep_params: dict) -> dict | None:
 
 def parse_output(output: str, sweep_params: dict) -> dict | None:
     """Extract summary stats from sr_sim.py output."""
-    # Try ALL SYMBOLS summary first, fall back to single-symbol summary
-    all_sym = re.search(
-        r"ALL SYMBOLS — (\d+) trades.*?\n"
-        r".*?TP hit\s+:\s+(\d+).*?\(([0-9.]+)%\)\n"
-        r".*?SL hit\s+:\s+(\d+).*?\(([0-9.]+)%\)\n"
-        r".*?Time exit\s+:\s+(\d+).*?\(([0-9.]+)%\)",
-        output, re.DOTALL
-    )
-    single = re.search(
-        r"— (\d+) trades.*?\n"
-        r".*?TP hit\s+:\s+(\d+).*?\(([0-9.]+)%\)\n"
-        r".*?SL hit\s+:\s+(\d+).*?\(([0-9.]+)%\)\n"
-        r".*?Time exit\s+:\s+(\d+).*?\(([0-9.]+)%\)",
-        output, re.DOTALL
-    )
+    lines = output.split('\n')
 
-    m = all_sym or single
+    # Find the ALL SYMBOLS summary line, or the last single-symbol summary line
+    target = None
+    for i, line in enumerate(lines):
+        if 'ALL SYMBOLS —' in line and 'trades' in line:
+            target = i
+            break  # prefer ALL SYMBOLS — stop at first match
+    if target is None:
+        for i, line in enumerate(lines):
+            if '—' in line and 'trades' in line and 'LONG' in line:
+                target = i  # keep updating to get the last one
+
+    if target is None:
+        return None
+
+    m = re.search(r'— (\d+) trades', lines[target])
     if not m:
+        return None
+    trades = int(m.group(1))
+
+    tp = sl = tx = None
+    tp_pct = sl_pct = tx_pct = None
+    for line in lines[target + 1 : target + 8]:
+        if 'TP hit' in line:
+            m2 = re.search(r':\s+(\d+)\s+\(([0-9.]+)%\)', line)
+            if m2:
+                tp, tp_pct = int(m2.group(1)), float(m2.group(2))
+        elif 'SL hit' in line:
+            m2 = re.search(r':\s+(\d+)\s+\(([0-9.]+)%\)', line)
+            if m2:
+                sl, sl_pct = int(m2.group(1)), float(m2.group(2))
+        elif 'Time exit' in line:
+            m2 = re.search(r':\s+(\d+)\s+\(([0-9.]+)%\)', line)
+            if m2:
+                tx, tx_pct = int(m2.group(1)), float(m2.group(2))
+
+    if None in (tp_pct, sl_pct, tx_pct):
         return None
 
     return {
-        "params":     sweep_params,
-        "trades":     int(m.group(1)),
-        "tp":         int(m.group(2)),
-        "tp_pct":     float(m.group(3)),
-        "sl":         int(m.group(4)),
-        "sl_pct":     float(m.group(5)),
-        "tx":         int(m.group(6)),
-        "tx_pct":     float(m.group(7)),
-        "score":      float(m.group(3)) - float(m.group(5)),  # TP% - SL%
+        "params":   sweep_params,
+        "trades":   trades,
+        "tp":       tp,
+        "tp_pct":   tp_pct,
+        "sl":       sl,
+        "sl_pct":   sl_pct,
+        "tx":       tx,
+        "tx_pct":   tx_pct,
+        "score":    tp_pct - sl_pct,
     }
 
 
