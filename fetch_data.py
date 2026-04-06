@@ -80,7 +80,7 @@ def candle_row(c: dict) -> list:
         float(c["high"]),
         float(c["low"]),
         float(c["close"]),
-        float(c.get("volume", 0)),
+        float(c.get("baseVol", 0)),   # baseVol = USDT value of trades
     ]
 
 
