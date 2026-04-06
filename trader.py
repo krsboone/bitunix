@@ -239,12 +239,13 @@ def close_position(client: BitunixClient, position_id: str,
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
-def run(debug: bool) -> None:
+def run(debug: bool, symbols: list[str] = None) -> None:
     client = BitunixClient(API_KEY, SECRET_KEY)
+    active_symbols = symbols or SYMBOLS
 
     log.info("━" * 60)
     log.info("  Bitunix Perpetual Futures Trader")
-    log.info(f"  Symbols   : {', '.join(SYMBOLS)}")
+    log.info(f"  Symbols   : {', '.join(active_symbols)}")
     log.info(f"  Leverage  : {LEVERAGE}×  |  Max trade : {MAX_TRADE_PCT:.0%}")
     log.info(f"  Z-entry   : {Z_ENTRY}  |  TP/SL mult: {TP_MULT}/{SL_MULT}σ")
     log.info(f"  Hold      : ≤{MAX_HOLD_MINS}min  |  Candles  : {SIGMA_CANDLES}×{INTERVAL}")
@@ -256,7 +257,7 @@ def run(debug: bool) -> None:
     log.info("━" * 60)
 
     # Set leverage on startup
-    for sym in SYMBOLS:
+    for sym in active_symbols:
         set_leverage(client, sym, debug)
 
     # Record starting balance for circuit breaker
@@ -273,7 +274,7 @@ def run(debug: bool) -> None:
         existing = get_open_positions(client)
         for p in existing:
             sym = p.get("symbol")
-            if sym not in SYMBOLS:
+            if sym not in active_symbols:
                 continue
             side = "LONG" if p.get("side", "").upper() == "BUY" else "SHORT"
             tracked[sym] = {
@@ -357,7 +358,7 @@ def run(debug: bool) -> None:
                         del tracked[sym]
 
             # ── Scan for entries ───────────────────────────────────────────────
-            for sym in SYMBOLS:
+            for sym in active_symbols:
                 if sym in tracked:
                     continue  # already in a position
 
@@ -464,5 +465,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Bitunix perpetual futures trader")
     parser.add_argument("--debug", action="store_true",
                         help="Run in DEBUG mode — no real orders placed")
+    parser.add_argument("--symbol", nargs="+", metavar="SYMBOL",
+                        help=f"Symbol(s) to trade (default: {', '.join(SYMBOLS)})")
     args = parser.parse_args()
-    run(debug=args.debug)
+    run(debug=args.debug, symbols=args.symbol)

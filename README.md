@@ -1,7 +1,7 @@
 # Bitunix Perpetual Futures Trader
 
 Algorithmic trading system for BTC, ETH, and RIVER perpetual futures on [Bitunix](https://www.bitunix.com).
-Two independent strategies, shared infrastructure.
+Two active strategies, shared infrastructure.
 
 ---
 
@@ -59,50 +59,35 @@ Monitors 1-minute candles and enters trades when cumulative price drift over a s
 - Reference balance resets when flat, so position sizing tracks actual balance
 
 ```bash
-python3 trader.py --debug    # simulate — no real orders
-python3 trader.py            # live trading
+python3 trader.py --debug                        # simulate — no real orders
+python3 trader.py                                # live trading — all symbols
+python3 trader.py --symbol RIVERUSDT             # single symbol
+python3 trader.py --symbol BTCUSDT ETHUSDT       # subset of symbols
 ```
 
-### `trend_trader.py` — Trend-Filtered Brownian Motion Strategy
-Adds a daily trend line filter on top of the Brownian motion signal. Only takes trades whose direction aligns with the broader trend — longs when price is below the trend line, shorts when above.
+### `follow_trader.py` — Follow-the-Trend Strategy
+Uses a daily projection trend line to set directional bias, then enters only when price has pulled back to or through the line — a mean-reversion-to-trend setup. The trend line slope determines which side to trade; price position relative to the line is the entry condition.
 
 **Trend line methodology** (matches Pine Script: *Historical Price Analysis & Projection Line*):
 - Fetches `LOOKBACK_DAYS` daily candles
 - **P1:** average open of the first 5 candles (range start)
 - **P2:** average close of the last 5 candles (range end)
 - **P3:** average `(high + low) / 2` of the middle 5 candles (midpoint anchor)
-- Slope computed from P1 → P2
-- Intercept averaged from both ends, then adjusted 30% toward the P3 deviation
+- Slope computed from P1 → P2, intercept adjusted 30% toward P3 deviation
 - Trend line refreshes every ~10 minutes (`TREND_REFRESH_CYCLES` poll cycles)
 
-**Trade gate:**
-- Price below trend line → LONG signals only
-- Price above trend line → SHORT signals only
-- Z-score must still exceed `Z_ENTRY` threshold in the bias direction
-
-```bash
-python3 trend_trader.py --debug    # simulate — no real orders
-python3 trend_trader.py            # live trading
-```
-
-### `follow_trader.py` — Follow-the-Trend Strategy
-Refines the trend line approach by using slope direction to set trade bias and price position relative to the line as an entry condition. Only enters when price has pulled back to or through the line in the trend direction — a mean-reversion-to-trend setup rather than a momentum gate.
-
-**Trend bias (differs from trend_trader.py):**
-- Rising slope → LONG signals only
-- Falling slope → SHORT signals only
-
 **Entry conditions (both must pass):**
-- Z-score must confirm the bias direction (same as other strategies)
+- Slope direction sets bias: rising → LONG only, falling → SHORT only
 - Price must be at or through the trend line:
   - LONG entries: `price ≤ trend line` (pulled back into uptrend)
   - SHORT entries: `price ≥ trend line` (bounced up into downtrend)
-
-This produces fewer but higher-conviction entries — only taking trades where price has returned to the trend line and momentum is resuming in the trend direction.
+- Z-score must confirm the bias direction
 
 ```bash
-python3 follow_trader.py --debug    # simulate — no real orders
-python3 follow_trader.py            # live trading
+python3 follow_trader.py --debug                        # simulate — no real orders
+python3 follow_trader.py                                # live trading — all symbols
+python3 follow_trader.py --symbol RIVERUSDT             # single symbol
+python3 follow_trader.py --symbol BTCUSDT ETHUSDT       # subset of symbols
 ```
 
 ### `backtest.py`
@@ -110,7 +95,7 @@ Replays recorded trade signals against historical 1-minute candles to determine 
 
 ```bash
 python3 backtest.py log/trades.csv                  # trader.py results
-python3 backtest.py log/trend_trades.csv            # trend_trader.py results
+python3 backtest.py log/follow_trades.csv           # follow_trader.py results
 python3 backtest.py log/trades.csv --hold 45        # test wider hold window
 python3 backtest.py log/archive/would-1.csv         # historical archive
 ```
@@ -133,7 +118,7 @@ Key constants at the top of each strategy file:
 | `FEE_TAKER` | Market order fee (update as tier improves) |
 | `FEE_MAKER` | Limit order fee (update as tier improves) |
 | `MIN_BALANCE_PCT` | Circuit breaker floor |
-| `LOOKBACK_DAYS` | Daily candles for trend line *(trend_trader only)* |
+| `LOOKBACK_DAYS` | Daily candles for trend line *(follow_trader only)* |
 
 ---
 
@@ -144,9 +129,9 @@ Both traders log to `log/` (gitignored):
 | File | Contents |
 |---|---|
 | `log/trader.log` | Full trader.py session log |
-| `log/trend_trader.log` | Full trend_trader.py session log |
+| `log/follow_trader.log` | Full follow_trader.py session log |
 | `log/trades.csv` | Signals from trader.py — backtest input |
-| `log/trend_trades.csv` | Signals from trend_trader.py — backtest input |
+| `log/follow_trades.csv` | Signals from follow_trader.py — backtest input |
 
 Archive CSVs periodically to `log/archive/` for historical comparison.
 
