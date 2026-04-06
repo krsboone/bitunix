@@ -37,7 +37,8 @@ from datetime import datetime, date, timezone
 
 # ── Configuration (tunable via args) ─────────────────────────────────────────
 
-SYMBOLS        = ["BTCUSDT", "ETHUSDT", "RIVERUSDT"]
+#SYMBOLS        = ["BTCUSDT", "ETHUSDT", "RIVERUSDT"]
+SYMBOLS        = ["BTCUSDT", "ETHUSDT"]
 DATA_DIR       = "data"
 INTERVAL       = "1m"
 
@@ -196,6 +197,10 @@ def run_symbol(symbol: str, candles: list,
     entry_data    = {}
     trade_entry_candle = None
 
+    total   = len(candles) - MIN_HISTORY
+    step    = max(1, total // 20)   # print ~20 progress updates
+    print(f"  {symbol}: walking {total:,} candles...", flush=True)
+
     # Track recently broken levels to avoid re-triggering
     broken_levels: dict[float, int] = {}   # level → candle index when broken
 
@@ -203,6 +208,14 @@ def run_symbol(symbol: str, candles: list,
         c = candles[i]
         price = c["close"]
         ts    = c["time"]
+
+        # ── Progress indicator ─────────────────────────────────────────────
+        elapsed = i - MIN_HISTORY
+        if elapsed % step == 0:
+            pct  = elapsed / total * 100
+            dt   = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+            print(f"  {symbol}: {pct:5.1f}%  {dt}  trades so far: {len(trades)}",
+                  flush=True)
 
         # ── Expire broken level cooldowns ──────────────────────────────────
         broken_levels = {lvl: idx for lvl, idx in broken_levels.items()
