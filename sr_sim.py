@@ -205,10 +205,54 @@ def run_symbol(symbol: str, candles: list,
     # Track recently broken levels to avoid re-triggering
     broken_levels: dict[float, int] = {}   # level → candle index when broken
 
+    # ── Incremental S/R session tracking (replaces O(n²) get_levels) ──────────
+    # Build initial session state from the warm-up period (candles[:MIN_HISTORY])
+    _sess_high = _sess_low = None
+    _prev_sess_high = _prev_sess_low = None
+    _sess_day = None
+    for _c in candles[:MIN_HISTORY]:
+        _d = utc_date(_c["time"])
+        if _d != _sess_day:
+            if _sess_high is not None:
+                _prev_sess_high = _sess_high
+                _prev_sess_low  = _sess_low
+            _sess_day  = _d
+            _sess_high = _c["high"]
+            _sess_low  = _c["low"]
+        else:
+            _sess_high = max(_sess_high, _c["high"])
+            _sess_low  = min(_sess_low,  _c["low"])
+
     for i in range(MIN_HISTORY, len(candles) - 1):
         c = candles[i]
         price = c["close"]
         ts    = c["time"]
+
+        # ── Update session state with previous candle (so levels reflect candles[:i]) ──
+        if i > MIN_HISTORY:
+            pc   = candles[i - 1]
+            pc_d = utc_date(pc["time"])
+            c_d  = utc_date(c["time"])
+            if c_d != pc_d:                      # day rolled over
+                _prev_sess_high = _sess_high
+                _prev_sess_low  = _sess_low
+                _sess_high = _sess_low = None
+            _sess_high = max(_sess_high, pc["high"]) if _sess_high is not None else pc["high"]
+            _sess_low  = min(_sess_low,  pc["low"])  if _sess_low  is not None else pc["low"]
+
+        # ── Pre-compute levels for this candle (O(240) not O(n)) ──────────────
+        _lvl = set()
+        if _sess_high is not None:
+            _lvl.add(_sess_high)
+            _lvl.add(_sess_low)
+        _w4h = candles[max(0, i - ROLLING_4H):i]
+        if _w4h:
+            _lvl.add(max(c2["high"] for c2 in _w4h))
+            _lvl.add(min(c2["low"]  for c2 in _w4h))
+        if _prev_sess_high is not None:
+            _lvl.add(_prev_sess_high)
+            _lvl.add(_prev_sess_low)
+        _precomputed_levels = sorted(_lvl)
 
         # ── Progress indicator ─────────────────────────────────────────────
         if not quiet:
@@ -344,7 +388,7 @@ def run_symbol(symbol: str, candles: list,
             continue
 
         # ── WATCHING — scan for levels to arm ─────────────────────────────
-        levels = get_levels(candles, i)
+        levels = _precomputed_levels
         if not levels:
             continue
 
