@@ -90,6 +90,37 @@ python3 follow_trader.py --symbol RIVERUSDT             # single symbol
 python3 follow_trader.py --symbol BTCUSDT ETHUSDT       # subset of symbols
 ```
 
+### `fetch_data.py`
+Downloads and maintains a local cache of historical OHLC candle data. On the first run fetches the full requested history; on subsequent runs only pulls candles newer than the last stored timestamp. Data is stored in `data/{SYMBOL}_{interval}.csv` (gitignored).
+
+```bash
+python3 fetch_data.py                            # update all symbols
+python3 fetch_data.py --symbol BTCUSDT           # single symbol
+python3 fetch_data.py --symbol BTCUSDT --days 60 # initial fetch, 60 days
+```
+
+### `sr_sim.py` — Support/Resistance Breakout Simulator
+Walk-forward simulator that tests the S/R breakout strategy against locally-cached candle data with no lookahead bias. Walks candle-by-candle, deriving all signals only from data available at that point in time.
+
+**Strategy:**
+- Identifies S/R levels from prior data only: current session high/low, 4h rolling high/low, previous session high/low
+- Arms when price approaches within `ARM_DISTANCE` of a level
+- Confirms breakout when the next candle closes beyond the level by `BREAKOUT_PCT` with volume above `VOL_MULT` × average and Z-score confirming direction
+- Enters at the open of the following candle
+
+All key parameters are tunable via command-line arguments, making it easy to sweep settings and compare results without code changes.
+
+```bash
+python3 sr_sim.py                              # all symbols, default settings
+python3 sr_sim.py --symbol BTCUSDT             # single symbol
+python3 sr_sim.py --tp 2.0 --sl 1.5           # custom TP/SL multipliers
+python3 sr_sim.py --vol-mult 2.0 --z 1.5      # tighter confirmation
+python3 sr_sim.py --breakout 0.0015            # wider breakout threshold
+python3 sr_sim.py --start 2026-04-01           # simulate from a specific date
+```
+
+Run `fetch_data.py` first to build the local cache before running the simulator.
+
 ### `backtest.py`
 Replays recorded trade signals against historical 1-minute candles to determine whether TP, SL, or the time limit would have been hit first. Both traders write to their own CSV automatically — no manual steps required.
 
