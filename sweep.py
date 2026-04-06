@@ -92,12 +92,22 @@ def run_sim(fixed_args: list[str], sweep_params: dict) -> dict | None:
         cmd += [k, str(v)]
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
         output = result.stdout
     except subprocess.TimeoutExpired:
+        print("  [TIMEOUT]", end="")
         return None
 
-    return parse_output(output, sweep_params)
+    if result.returncode != 0:
+        print(f"  [EXIT {result.returncode}]", end="")
+        return None
+
+    parsed = parse_output(output, sweep_params)
+    if parsed is None:
+        # Show last few lines of output for diagnosis
+        tail = [l for l in output.split('\n') if l.strip()][-5:]
+        print(f"\n  [DEBUG last lines]: {tail}", end="")
+    return parsed
 
 
 def parse_output(output: str, sweep_params: dict) -> dict | None:
