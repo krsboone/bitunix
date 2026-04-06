@@ -84,7 +84,7 @@ DEFAULTS = {
 
 def run_sim(fixed_args: list[str], sweep_params: dict) -> dict | None:
     """Run sr_sim.py with given parameters. Returns parsed result or None."""
-    cmd = [sys.executable, "sr_sim.py"] + fixed_args
+    cmd = [sys.executable, "sr_sim.py", "--quiet"] + fixed_args
 
     # Apply defaults, then override with sweep params
     merged = {**DEFAULTS, **sweep_params}

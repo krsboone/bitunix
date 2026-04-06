@@ -172,7 +172,7 @@ class State:
 
 def run_symbol(symbol: str, candles: list,
                start_date: date | None, end_date: date | None,
-               args) -> list[dict]:
+               args, quiet: bool = False) -> list[dict]:
     """
     Walk forward through candles, simulate the S/R breakout strategy.
     Returns list of completed trade records.
@@ -199,7 +199,8 @@ def run_symbol(symbol: str, candles: list,
 
     total   = len(candles) - MIN_HISTORY
     step    = max(1, total // 20)   # print ~20 progress updates
-    print(f"  {symbol}: walking {total:,} candles...", flush=True)
+    if not quiet:
+        print(f"  {symbol}: walking {total:,} candles...", flush=True)
 
     # Track recently broken levels to avoid re-triggering
     broken_levels: dict[float, int] = {}   # level → candle index when broken
@@ -210,12 +211,13 @@ def run_symbol(symbol: str, candles: list,
         ts    = c["time"]
 
         # ── Progress indicator ─────────────────────────────────────────────
-        elapsed = i - MIN_HISTORY
-        if elapsed % step == 0:
-            pct  = elapsed / total * 100
-            dt   = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
-            print(f"  {symbol}: {pct:5.1f}%  {dt}  trades so far: {len(trades)}",
-                  flush=True)
+        if not quiet:
+            elapsed = i - MIN_HISTORY
+            if elapsed % step == 0:
+                pct  = elapsed / total * 100
+                dt   = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+                print(f"  {symbol}: {pct:5.1f}%  {dt}  trades so far: {len(trades)}",
+                      flush=True)
 
         # ── Expire broken level cooldowns ──────────────────────────────────
         broken_levels = {lvl: idx for lvl, idx in broken_levels.items()
@@ -367,24 +369,26 @@ def run_symbol(symbol: str, candles: list,
 
 # ── Reporting ─────────────────────────────────────────────────────────────────
 
-def print_results(all_trades: list[dict], symbols: list[str]) -> None:
+def print_results(all_trades: list[dict], symbols: list[str],
+                  quiet: bool = False) -> None:
     if not all_trades:
         print("No trades recorded.")
         return
 
-    # ── Trade table ────────────────────────────────────────────────────────
-    col_w = 80
-    print("─" * col_w)
-    print(f"{'Time':<22} {'Sym':<10} {'Side':<6} {'Entry':>10} "
-          f"{'TP':>10} {'SL':>10} {'Outcome':<12} {'Mins':>6} {'Close':>10}")
-    print("─" * col_w)
+    if not quiet:
+        # ── Trade table ────────────────────────────────────────────────────
+        col_w = 80
+        print("─" * col_w)
+        print(f"{'Time':<22} {'Sym':<10} {'Side':<6} {'Entry':>10} "
+              f"{'TP':>10} {'SL':>10} {'Outcome':<12} {'Mins':>6} {'Close':>10}")
+        print("─" * col_w)
 
-    for t in sorted(all_trades, key=lambda x: x["time"]):
-        print(f"{t['time']:<22} {t['symbol']:<10} {t['side']:<6} "
-              f"{t['entry_price']:>10.4f} {t['tp']:>10.4f} {t['sl']:>10.4f} "
-              f"{t['outcome']:<12} {t['mins']:>6.1f} {t['close_price']:>10.4f}")
+        for t in sorted(all_trades, key=lambda x: x["time"]):
+            print(f"{t['time']:<22} {t['symbol']:<10} {t['side']:<6} "
+                  f"{t['entry_price']:>10.4f} {t['tp']:>10.4f} {t['sl']:>10.4f} "
+                  f"{t['outcome']:<12} {t['mins']:>6.1f} {t['close_price']:>10.4f}")
 
-    print("─" * col_w)
+        print("─" * col_w)
 
     # ── Per-symbol summary ─────────────────────────────────────────────────
     for sym in symbols:
@@ -447,44 +451,50 @@ def main() -> None:
                         help=f"Hold intervals for sigma scaling (default: {HOLD_INTERVALS})")
     parser.add_argument("--cooldown", type=int, default=LEVEL_COOLDOWN,
                         help=f"Candles before re-triggering same level (default: {LEVEL_COOLDOWN})")
+    parser.add_argument("--quiet", action="store_true",
+                        help="Suppress progress and trade table (summary only)")
 
     args    = parser.parse_args()
     symbols = args.symbol or SYMBOLS
+    quiet   = args.quiet
 
     start_date = (date.fromisoformat(args.start) if args.start else None)
     end_date   = (date.fromisoformat(args.end)   if args.end   else None)
 
-    # Print config
-    print(f"\nS/R Breakout Simulator")
-    print(f"  Symbols     : {', '.join(symbols)}")
-    if start_date or end_date:
-        print(f"  Date range  : {args.start or 'start'} → {args.end or 'now'}")
-    print(f"  Arm dist    : {args.arm_distance*100:.2f}%  "
-          f"Breakout: {args.breakout*100:.3f}%  "
-          f"Vol mult: {args.vol_mult}×")
-    print(f"  Z-entry     : {args.z_entry}  "
-          f"TP/SL: {args.tp}/{args.sl}σ  "
-          f"Hold: {args.hold}min")
-    print()
+    if not quiet:
+        print(f"\nS/R Breakout Simulator")
+        print(f"  Symbols     : {', '.join(symbols)}")
+        if start_date or end_date:
+            print(f"  Date range  : {args.start or 'start'} → {args.end or 'now'}")
+        print(f"  Arm dist    : {args.arm_distance*100:.2f}%  "
+              f"Breakout: {args.breakout*100:.3f}%  "
+              f"Vol mult: {args.vol_mult}×")
+        print(f"  Z-entry     : {args.z_entry}  "
+              f"TP/SL: {args.tp}/{args.sl}σ  "
+              f"Hold: {args.hold}min")
+        print()
 
     all_trades = []
 
     for sym in symbols:
         try:
             candles = load_candles(sym)
-            print(f"  {sym}: {len(candles)} candles loaded  "
-                  f"({datetime.fromtimestamp(candles[0]['time']/1000, tz=timezone.utc).strftime('%Y-%m-%d')} "
-                  f"→ {datetime.fromtimestamp(candles[-1]['time']/1000, tz=timezone.utc).strftime('%Y-%m-%d')})")
-            trades = run_symbol(sym, candles, start_date, end_date, args)
-            print(f"  {sym}: {len(trades)} trades simulated")
+            if not quiet:
+                print(f"  {sym}: {len(candles)} candles loaded  "
+                      f"({datetime.fromtimestamp(candles[0]['time']/1000, tz=timezone.utc).strftime('%Y-%m-%d')} "
+                      f"→ {datetime.fromtimestamp(candles[-1]['time']/1000, tz=timezone.utc).strftime('%Y-%m-%d')})")
+            trades = run_symbol(sym, candles, start_date, end_date, args, quiet=quiet)
+            if not quiet:
+                print(f"  {sym}: {len(trades)} trades simulated")
             all_trades.extend(trades)
         except FileNotFoundError as e:
             print(f"  {sym}: {e}")
         except Exception as e:
             print(f"  {sym}: error — {e}")
 
-    print()
-    print_results(all_trades, symbols)
+    if not quiet:
+        print()
+    print_results(all_trades, symbols, quiet=quiet)
     print()
 
 
