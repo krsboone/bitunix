@@ -188,13 +188,18 @@ def evaluate_trade(trade: dict, candles: list[dict],
 
     # Ran out of candle data without resolution
     last_close = candles[-1]["close"] if candles else entry_price
+    last_mins  = (datetime.fromtimestamp(candles[-1]["time"] / 1000,
+                  tz=timezone.utc) - entry_time).total_seconds() / 60 if candles else 0
+
+    # If a hold limit was set, exhausting the candle window = time exit
+    # (candles_from already clipped to max_hold_mins; TP/SL simply didn't fire)
+    outcome    = "TIME_EXIT" if max_hold_mins is not None else "NO_DATA"
+    exit_fee   = fee_taker
     return {
-        "outcome":     "NO_DATA",
-        "mins":        (datetime.fromtimestamp(candles[-1]["time"] / 1000,
-                        tz=timezone.utc) - entry_time).total_seconds() / 60
-                       if candles else 0,
+        "outcome":     outcome,
+        "mins":        last_mins,
         "close_price": last_close,
-        "pnl":         calc_pnl(last_close, fee_taker),
+        "pnl":         calc_pnl(last_close, exit_fee),
         "entry_price": entry_price,
     }
 
