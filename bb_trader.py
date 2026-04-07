@@ -388,23 +388,17 @@ def _process_symbol(client: BitunixClient, sym: str, s: dict,
 
     if price > upper and squeeze_ok and s["long_blocked"] == 0:
         # Momentum LONG: price broke above upper band
-        sl_dist = hw * SL_MULT
         s["pending_side"] = "LONG"
-        s["pending_tp"]   = upper + hw * TP_MULT
-        s["pending_sl"]   = upper - sl_dist
+        s["pending_hw"]   = hw
         s["state"]        = "ENTRY_PENDING"
-        log.info(f"  {sym}: LONG signal  upper={upper:.4f}  "
-                 f"tp={s['pending_tp']:.4f}  sl={s['pending_sl']:.4f}")
+        log.info(f"  {sym}: LONG signal  upper={upper:.4f}  hw={hw:.4f}")
 
     elif price < lower and squeeze_ok and s["short_blocked"] == 0:
         # Momentum SHORT: price broke below lower band
-        sl_dist = hw * SL_MULT
         s["pending_side"] = "SHORT"
-        s["pending_tp"]   = lower - hw * TP_MULT
-        s["pending_sl"]   = lower + sl_dist
+        s["pending_hw"]   = hw
         s["state"]        = "ENTRY_PENDING"
-        log.info(f"  {sym}: SHORT signal  lower={lower:.4f}  "
-                 f"tp={s['pending_tp']:.4f}  sl={s['pending_sl']:.4f}")
+        log.info(f"  {sym}: SHORT signal  lower={lower:.4f}  hw={hw:.4f}")
 
     else:
         blocked = []
@@ -417,13 +411,20 @@ def _process_symbol(client: BitunixClient, sym: str, s: dict,
 def _enter_pending(client: BitunixClient, sym: str, s: dict,
                    c1: dict, balance: float, debug: bool) -> None:
     """Execute the pending entry at the open of this 1m candle."""
-    side     = s["pending_side"]
-    tp_price = s["pending_tp"]
-    sl_price = s["pending_sl"]
+    side = s["pending_side"]
+    hw   = s["pending_hw"]
 
     # Use live ticker for a tighter entry price estimate
     ticker      = fetch_ticker(client, sym)
     entry_price = float(ticker.get("lastPrice", c1["open"]))
+
+    # Anchor TP/SL to actual entry price (not stale band levels from signal candle)
+    if side == "LONG":
+        tp_price = entry_price + hw * TP_MULT
+        sl_price = entry_price - hw * SL_MULT
+    else:
+        tp_price = entry_price - hw * TP_MULT
+        sl_price = entry_price + hw * SL_MULT
 
     # Fee gate: skip if the TP distance doesn't cover round-trip fees
     tp_dist  = abs(tp_price - entry_price)
@@ -431,7 +432,7 @@ def _enter_pending(client: BitunixClient, sym: str, s: dict,
     if tp_dist <= fee_cost:
         log.info(f"  {sym}: SKIP entry — TP dist {tp_dist:.4f} ≤ fee {fee_cost:.4f}")
         s["state"]        = "WATCHING"
-        s["pending_side"] = s["pending_tp"] = s["pending_sl"] = None
+        s["pending_side"] = s["pending_hw"] = None
         return
 
     notional = balance * MAX_TRADE_PCT * LEVERAGE
@@ -440,7 +441,7 @@ def _enter_pending(client: BitunixClient, sym: str, s: dict,
     if qty < min_qty:
         log.info(f"  {sym}: qty {qty} < min {min_qty}, skip")
         s["state"]        = "WATCHING"
-        s["pending_side"] = s["pending_tp"] = s["pending_sl"] = None
+        s["pending_side"] = s["pending_hw"] = None
         return
 
     log.info(f"  {sym}: ENTER {side}  entry≈{entry_price:.4f}  "
@@ -449,7 +450,7 @@ def _enter_pending(client: BitunixClient, sym: str, s: dict,
     order_id = place_order(client, sym, side, qty, tp_price, sl_price, debug)
     if order_id is None:
         s["state"]        = "WATCHING"
-        s["pending_side"] = s["pending_tp"] = s["pending_sl"] = None
+        s["pending_side"] = s["pending_hw"] = None
         return
 
     log_trade({
@@ -599,8 +600,7 @@ def run(debug: bool, symbols: list[str] = None) -> None:
             # State machine
             "state":          "WATCHING",
             "pending_side":   None,
-            "pending_tp":     None,
-            "pending_sl":     None,
+            "pending_hw":     None,
             "position":       None,
             # Directional cooldowns (in 5m candle counts)
             "long_blocked":   0,
