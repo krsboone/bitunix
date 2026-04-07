@@ -327,7 +327,7 @@ def main() -> None:
                     ("--arm-distance", "arm_distance"), ("--tp", "tp"),
                     ("--sl", "sl"), ("--period", "period"), ("--mult", "mult"),
                     ("--squeeze", "squeeze"), ("--sl-mult", "sl_mult"),
-                    ("--cooldown", "cooldown")]:
+                    ("--cooldown", "cooldown"), ("--tp-mult", "tp_mult")]:
         v = getattr(args, attr.lstrip("-").replace("-", "_"), None)
         if v is not None:
             overrides[k] = v
