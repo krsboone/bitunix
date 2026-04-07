@@ -276,11 +276,23 @@ def set_leverage(client: BitunixClient, symbol: str, debug: bool) -> None:
 
 
 def log_trade(body: dict) -> None:
+    """Write a row in backtest.py-compatible key-value format."""
     os.makedirs("log", exist_ok=True)
-    ts = now_utc().strftime("%Y-%m-%d %H:%M:%S")
-    row = [ts, body.get("symbol"), body.get("side"), body.get("qty"),
-           body.get("tp_price"), body.get("sl_price"),
-           body.get("entry_price"), body.get("sigma")]
+    ts      = now_utc().strftime("%Y-%m-%d %H:%M:%S")
+    side    = body.get("side")
+    buy_sell = "BUY" if side == "LONG" else "SELL"
+    row = [
+        ts, ts,
+        "symbol",     body.get("symbol"),
+        "qty",        body.get("qty"),
+        "side",       buy_sell,
+        "orderType",  "MARKET",
+        "tradeSide",  "OPEN",
+        "tpPrice",    body.get("tp_price"),
+        "slPrice",    body.get("sl_price"),
+        "tpStopType", "MARK_PRICE",
+        "slStopType", "MARK_PRICE",
+    ]
     with open(TRADE_CSV, "a", newline="") as f:
         csv.writer(f).writerow(row)
 
