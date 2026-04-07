@@ -1,47 +1,110 @@
 """
-backtest.py — Replay would-be trades against historical candles
+backtest.py — Replay would-be trades against locally-cached candle data
 
-For each trade in the CSV, fetches 1-minute candles from entry time
-forward (up to MAX_HOLD_MINS) and determines whether TP or SL would
-have been hit first, or if the position would have timed out.
+Reads a trades CSV (produced by trader.py, sr_trader.py, bb_trader.py, etc.)
+and walks through the local 1m candle cache to determine whether each trade
+would have hit TP, SL, or timed out. Reports PnL per trade including fees.
+
+Fee model:
+  Entry:            taker fee (market order)
+  TP exit:          maker fee (limit order filled by exchange)
+  SL / Time exit:   taker fee (market order)
+  Configurable via --fee-taker and --fee-maker
+
+Hold behaviour:
+  --hold N   : scan up to N minutes, then time-exit
+  (omitted)  : scan until TP or SL is hit; no time cap
 
 Usage:
-    python3 backtest.py log/archive/would-1.csv
-    python3 backtest.py log/archive/would-1.csv --hold 45
+    python3 backtest.py log/sr_trades.csv
+    python3 backtest.py log/bb_trades.csv --hold 33
+    python3 backtest.py log/trades.csv --hold 45 --fee-taker 0.0006
 """
 
 import argparse
 import csv
-import sys
-import time
-from datetime import datetime, timezone, timedelta
+import os
+from datetime import datetime, timezone
 
-from auth import BitunixClient
-from config import API_KEY, SECRET_KEY
+DATA_DIR = "data"
 
-MAX_HOLD_MINS = 30      # match trader.py default (override with --hold)
-CANDLES_AHEAD = 35      # fetch slightly more than MAX_HOLD_MINS to cover slippage
+# ── Fee defaults ───────────────────────────────────────────────────────────────
 
+FEE_TAKER = 0.00060   # market order (entry, SL, time exit)
+FEE_MAKER = 0.00020   # limit order  (TP hit via inline limit on exchange)
+
+
+# ── Local candle cache ─────────────────────────────────────────────────────────
+
+_candle_cache: dict[str, list[dict]] = {}
+
+def _load_symbol(symbol: str) -> list[dict]:
+    """Load and cache local 1m candles for a symbol."""
+    if symbol in _candle_cache:
+        return _candle_cache[symbol]
+    path = os.path.join(DATA_DIR, f"{symbol}_1m.csv")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"No local data for {symbol} at {path}. "
+            f"Run: python3 fetch_data.py --symbol {symbol}"
+        )
+    candles = []
+    with open(path, newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            candles.append({
+                "time":  int(row["timestamp_ms"]),
+                "open":  float(row["open"]),
+                "high":  float(row["high"]),
+                "low":   float(row["low"]),
+                "close": float(row["close"]),
+            })
+    candles.sort(key=lambda c: c["time"])
+    _candle_cache[symbol] = candles
+    return candles
+
+
+def candles_from(symbol: str, from_ts_ms: int,
+                 max_mins: int | None) -> list[dict]:
+    """
+    Return local candles for symbol starting at from_ts_ms.
+    If max_mins is given, cap at from_ts_ms + max_mins minutes.
+    """
+    all_c  = _load_symbol(symbol)
+    end_ms = (from_ts_ms + max_mins * 60_000) if max_mins is not None else None
+    result = []
+    for c in all_c:
+        if c["time"] < from_ts_ms:
+            continue
+        if end_ms is not None and c["time"] > end_ms:
+            break
+        result.append(c)
+    return result
+
+
+# ── Trade CSV parsing ──────────────────────────────────────────────────────────
 
 def parse_row(row: list[str]) -> dict | None:
     """Parse a CSV row into a trade dict. Returns None if unparseable."""
     try:
-        # Format: timestamp, timestamp, symbol, SYM, qty, N, side, BUY/SELL, ..., tpPrice, N, slPrice, N, ...
         fields = [f.strip() for f in row]
+
         def get(key):
             idx = fields.index(key)
             return fields[idx + 1]
 
         raw_ts = fields[0].strip()
-        # Handle compact format "2026-04-0318:28:22" (len 18, no space)
+        # Handle compact "2026-04-0318:28:22" format (no space between date/time)
         if len(raw_ts) == 18 and " " not in raw_ts:
             raw_ts = raw_ts[:10] + " " + raw_ts[10:]
-        entry_time = datetime.strptime(raw_ts, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        entry_time = datetime.strptime(raw_ts, "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=timezone.utc)
 
         return {
             "entry_time": entry_time,
+            "entry_ts":   int(entry_time.timestamp() * 1000),
             "symbol":     get("symbol"),
-            "side":       get("side"),      # BUY or SELL
+            "side":       get("side"),        # BUY or SELL
             "qty":        float(get("qty")),
             "tp_price":   float(get("tpPrice")),
             "sl_price":   float(get("slPrice")),
@@ -50,80 +113,96 @@ def parse_row(row: list[str]) -> dict | None:
         return None
 
 
-def fetch_candles_from(client: BitunixClient, symbol: str,
-                       from_time: datetime, count: int) -> list[dict]:
-    """
-    Fetch `count` 1-minute candles starting from from_time.
-    Bitunix kline returns candles newest-first ending at endTime,
-    so we set endTime = from_time + count minutes and filter.
-    """
-    end_ms = int((from_time.timestamp() + count * 60) * 1000)
-    resp = client.get("/api/v1/futures/market/kline", {
-        "symbol":  symbol,
-        "interval": "1m",
-        "limit":   str(count),
-        "endTime": str(end_ms),
-    })
-    if resp.get("code") != 0:
-        return []
-    candles = resp.get("data", [])
-    # Sort ascending and filter to only candles at or after entry time
-    entry_ms = int(from_time.timestamp() * 1000)
-    candles  = [c for c in candles if int(c.get("time", 0)) >= entry_ms]
-    return sorted(candles, key=lambda c: int(c.get("time", 0)))
+# ── Trade evaluation ───────────────────────────────────────────────────────────
 
-
-def evaluate_trade(trade: dict, candles: list[dict], max_hold_mins: int) -> dict:
+def evaluate_trade(trade: dict, candles: list[dict],
+                   max_hold_mins: int | None,
+                   fee_taker: float, fee_maker: float) -> dict:
     """
-    Walk candles forward from entry, check if high/low touches TP or SL.
-    Returns result dict with outcome, minutes_to_outcome, pnl_per_unit.
+    Walk candles forward from entry. Returns result dict:
+      outcome, mins, close_price, pnl (after fees), entry_price_est
     """
-    tp = trade["tp_price"]
-    sl = trade["sl_price"]
+    tp      = trade["tp_price"]
+    sl      = trade["sl_price"]
     is_long = trade["side"] == "BUY"
+    qty     = trade["qty"]
     entry_time = trade["entry_time"]
 
-    for i, candle in enumerate(candles):
-        candle_time = datetime.fromtimestamp(int(candle["time"]) / 1000, tz=timezone.utc)
+    # Estimate entry price as the open of the first candle at/after entry
+    entry_price = candles[0]["open"] if candles else (tp + sl) / 2
+
+    def calc_pnl(close_price: float, exit_fee_rate: float) -> float:
+        direction = 1 if is_long else -1
+        gross = direction * (close_price - entry_price) * qty
+        fees  = (entry_price * fee_taker + close_price * exit_fee_rate) * qty
+        return gross - fees
+
+    for candle in candles:
+        candle_time  = datetime.fromtimestamp(candle["time"] / 1000, tz=timezone.utc)
         mins_elapsed = (candle_time - entry_time).total_seconds() / 60
 
-        if mins_elapsed > max_hold_mins:
-            close_price = float(candle["close"])
-            pnl = (close_price - trade["tp_price"]) if is_long else (trade["tp_price"] - close_price)
-            # Use entry approximation: midpoint of TP/SL range as entry
-            entry_est = (tp + sl) / 2  # rough; actual entry is entry candle close
-            close_pnl = (close_price - entry_est) if is_long else (entry_est - close_price)
+        # Time exit cap (only when --hold is set)
+        if max_hold_mins is not None and mins_elapsed > max_hold_mins:
+            close_price = candle["close"]
             return {
-                "outcome":     "TIME_EXIT",
-                "mins":        mins_elapsed,
-                "close_price": close_price,
-                "pnl_dir":     close_pnl,
+                "outcome":      "TIME_EXIT",
+                "mins":         mins_elapsed,
+                "close_price":  close_price,
+                "pnl":          calc_pnl(close_price, fee_taker),
+                "entry_price":  entry_price,
             }
 
-        high = float(candle["high"])
-        low  = float(candle["low"])
+        high = candle["high"]
+        low  = candle["low"]
 
+        # Check both TP and SL within the same candle
         if is_long:
-            # Check SL first (worse outcome) then TP — conservative
-            if low <= sl:
-                return {"outcome": "SL_HIT", "mins": mins_elapsed,
-                        "close_price": sl, "pnl_dir": sl - tp}
-            if high >= tp:
-                return {"outcome": "TP_HIT", "mins": mins_elapsed,
-                        "close_price": tp, "pnl_dir": tp - sl}
+            sl_hit = low  <= sl
+            tp_hit = high >= tp
         else:
-            if high >= sl:
-                return {"outcome": "SL_HIT", "mins": mins_elapsed,
-                        "close_price": sl, "pnl_dir": sl - tp}
-            if low <= tp:
+            sl_hit = high >= sl
+            tp_hit = low  <= tp
+
+        if sl_hit and tp_hit:
+            # Both triggered — use whichever is closer to entry
+            if abs(tp - entry_price) <= abs(sl - entry_price):
                 return {"outcome": "TP_HIT", "mins": mins_elapsed,
-                        "close_price": tp, "pnl_dir": tp - sl}
+                        "close_price": tp,
+                        "pnl": calc_pnl(tp, fee_maker),
+                        "entry_price": entry_price}
+            else:
+                return {"outcome": "SL_HIT", "mins": mins_elapsed,
+                        "close_price": sl,
+                        "pnl": calc_pnl(sl, fee_taker),
+                        "entry_price": entry_price}
+        elif tp_hit:
+            return {"outcome": "TP_HIT", "mins": mins_elapsed,
+                    "close_price": tp,
+                    "pnl": calc_pnl(tp, fee_maker),
+                    "entry_price": entry_price}
+        elif sl_hit:
+            return {"outcome": "SL_HIT", "mins": mins_elapsed,
+                    "close_price": sl,
+                    "pnl": calc_pnl(sl, fee_taker),
+                    "entry_price": entry_price}
 
-    return {"outcome": "NO_DATA", "mins": 0, "close_price": 0, "pnl_dir": 0}
+    # Ran out of candle data without resolution
+    last_close = candles[-1]["close"] if candles else entry_price
+    return {
+        "outcome":     "NO_DATA",
+        "mins":        (datetime.fromtimestamp(candles[-1]["time"] / 1000,
+                        tz=timezone.utc) - entry_time).total_seconds() / 60
+                       if candles else 0,
+        "close_price": last_close,
+        "pnl":         calc_pnl(last_close, fee_taker),
+        "entry_price": entry_price,
+    }
 
 
-def run(csv_path: str, max_hold_mins: int) -> None:
-    client = BitunixClient(API_KEY, SECRET_KEY)
+# ── Main ───────────────────────────────────────────────────────────────────────
+
+def run(csv_path: str, max_hold_mins: int | None,
+        fee_taker: float, fee_maker: float) -> None:
 
     with open(csv_path, newline="") as f:
         rows = list(csv.reader(f))
@@ -131,46 +210,77 @@ def run(csv_path: str, max_hold_mins: int) -> None:
     trades = [parse_row(r) for r in rows if r]
     trades = [t for t in trades if t]
 
+    hold_label = f"{max_hold_mins}min" if max_hold_mins is not None else "unlimited"
     print(f"\nBacktest — {csv_path}")
-    print(f"Trades parsed : {len(trades)}  |  Max hold : {max_hold_mins}min")
-    print("─" * 80)
-    print(f"{'Time':19}  {'Sym':10} {'Side':5} {'TP':>10} {'SL':>10} "
-          f"{'Outcome':10} {'Mins':>5} {'Close':>10}")
-    print("─" * 80)
+    print(f"Trades parsed : {len(trades)}  |  Hold : {hold_label}")
+    print(f"Fees          : taker {fee_taker*100:.3f}%  maker {fee_maker*100:.3f}%")
+    print("─" * 100)
+    print(f"{'Time':19}  {'Sym':10} {'Side':4}  {'Entry':>10} {'TP':>10} {'SL':>10} "
+          f"{'Outcome':10} {'Mins':>5}  {'Close':>10}  {'PnL':>10}")
+    print("─" * 100)
 
-    results = {"TP_HIT": 0, "SL_HIT": 0, "TIME_EXIT": 0, "NO_DATA": 0}
+    results   = {"TP_HIT": 0, "SL_HIT": 0, "TIME_EXIT": 0, "NO_DATA": 0}
+    total_pnl = 0.0
+    skipped   = 0
 
     for trade in trades:
-        # Rate limit courtesy pause
-        time.sleep(0.2)
+        sym = trade["symbol"]
+        try:
+            candles = candles_from(sym, trade["entry_ts"], max_hold_mins)
+        except FileNotFoundError as e:
+            print(f"  SKIP {sym}: {e}")
+            skipped += 1
+            continue
 
-        candles = fetch_candles_from(client, trade["symbol"],
-                                     trade["entry_time"], CANDLES_AHEAD)
-        result  = evaluate_trade(trade, candles, max_hold_mins)
+        if not candles:
+            print(f"  {trade['entry_time'].strftime('%Y-%m-%d %H:%M:%S')}  "
+                  f"{sym:10} {trade['side']:4}  — no candles at entry time —")
+            skipped += 1
+            continue
+
+        result = evaluate_trade(trade, candles, max_hold_mins, fee_taker, fee_maker)
         results[result["outcome"]] = results.get(result["outcome"], 0) + 1
+        total_pnl += result["pnl"]
 
         ts  = trade["entry_time"].strftime("%Y-%m-%d %H:%M:%S")
-        sym = trade["symbol"]
-        print(f"{ts}  {sym:10} {trade['side']:5} "
-              f"{trade['tp_price']:>10.3f} {trade['sl_price']:>10.3f}  "
-              f"{result['outcome']:10} {result['mins']:>5.1f} "
-              f"{result['close_price']:>10.3f}")
+        pnl_str = f"{result['pnl']:+.4f}"
+        print(f"{ts}  {sym:10} {trade['side']:4}  "
+              f"{result['entry_price']:>10.4f} {trade['tp_price']:>10.4f} "
+              f"{trade['sl_price']:>10.4f}  "
+              f"{result['outcome']:10} {result['mins']:>5.1f}  "
+              f"{result['close_price']:>10.4f}  {pnl_str:>10}")
 
-    total = len(trades)
-    print("─" * 80)
+    total = len(trades) - skipped
+    print("─" * 100)
+
+    if total == 0:
+        print(f"\nSummary (0 trades)")
+        return
+
     print(f"\nSummary ({total} trades)")
-    print(f"  TP hit    : {results['TP_HIT']:>3}  ({results['TP_HIT']/total*100:.1f}%)")
-    print(f"  SL hit    : {results['SL_HIT']:>3}  ({results['SL_HIT']/total*100:.1f}%)")
-    print(f"  Time exit : {results['TIME_EXIT']:>3}  ({results['TIME_EXIT']/total*100:.1f}%)")
+    print(f"  TP hit    : {results['TP_HIT']:>4}  ({results['TP_HIT']/total*100:.1f}%)")
+    print(f"  SL hit    : {results['SL_HIT']:>4}  ({results['SL_HIT']/total*100:.1f}%)")
+    print(f"  Time exit : {results['TIME_EXIT']:>4}  ({results['TIME_EXIT']/total*100:.1f}%)")
     if results["NO_DATA"]:
-        print(f"  No data   : {results['NO_DATA']:>3}")
+        print(f"  No data   : {results['NO_DATA']:>4}")
+    if skipped:
+        print(f"  Skipped   : {skipped:>4}")
+    print(f"  Total PnL : {total_pnl:+.4f} USDT  (after fees)")
     print()
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Backtest would-be trades from CSV")
-    parser.add_argument("csv", help="Path to would-be trades CSV")
-    parser.add_argument("--hold", type=int, default=MAX_HOLD_MINS,
-                        help=f"Max hold minutes (default {MAX_HOLD_MINS})")
+    parser = argparse.ArgumentParser(
+        description="Backtest would-be trades against local candle cache")
+    parser.add_argument("csv",
+                        help="Path to trades CSV")
+    parser.add_argument("--hold", type=int, default=None,
+                        help="Max hold minutes (default: unlimited — scan until TP/SL)")
+    parser.add_argument("--fee-taker", type=float, default=FEE_TAKER,
+                        dest="fee_taker",
+                        help=f"Taker fee rate (default: {FEE_TAKER})")
+    parser.add_argument("--fee-maker", type=float, default=FEE_MAKER,
+                        dest="fee_maker",
+                        help=f"Maker fee rate (default: {FEE_MAKER})")
     args = parser.parse_args()
-    run(args.csv, args.hold)
+    run(args.csv, args.hold, args.fee_taker, args.fee_maker)
