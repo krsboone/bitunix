@@ -1,27 +1,30 @@
 """
-sweep.py — Parameter sweep for sr_sim.py
+sweep.py — Parameter sweep for sr_sim.py and bb_sim.py
 
-Runs sr_sim.py across a grid of parameter combinations and ranks results
-by TP rate. Prints a sorted summary table — no manual runs needed.
+Runs a simulator across a grid of parameter combinations and ranks results
+by score (TP% - SL%). Prints a sorted summary table.
 
-Two sweep modes:
-  --mode vol-break  : sweep vol-mult × breakout (default)
+S/R simulator modes (sr_sim.py):
+  --mode vol-break  : sweep vol-mult × breakout threshold
   --mode tp-sl      : sweep tp × sl multipliers
   --mode arm        : sweep arm-distance × breakout
   --mode river      : RIVER-specific sweep (wider arm/breakout)
 
-Each mode fixes non-swept parameters at their best-known defaults
-so results are comparable. Run vol-break first, then use the winner
-as defaults when running tp-sl or arm.
+Bollinger Band simulator modes (bb_sim.py):
+  --mode bb-bands   : sweep BB period × std-dev multiplier
+  --mode bb-squeeze : sweep squeeze threshold × squeeze lookback
+  --mode bb-sl      : sweep sl-mult × cooldown
+
+Each mode fixes non-swept parameters at their best-known defaults.
+Run bb-bands first, then use the winner as defaults for bb-squeeze and bb-sl.
 
 Usage:
-    python3 sweep.py                          # vol-mult × breakout sweep
-    python3 sweep.py --mode tp-sl             # TP/SL multiplier sweep
-    python3 sweep.py --mode arm               # arm-distance × breakout sweep
-    python3 sweep.py --mode river             # RIVER-specific tuning
+    python3 sweep.py                          # vol-mult × breakout sweep (sr)
+    python3 sweep.py --mode bb-bands          # BB period × mult sweep
+    python3 sweep.py --mode bb-squeeze        # squeeze filter sweep
+    python3 sweep.py --mode bb-sl             # SL multiplier × cooldown sweep
     python3 sweep.py --symbol BTCUSDT         # limit to one symbol
     python3 sweep.py --start 2026-04-01       # limit date range
-    python3 sweep.py --vol-mult 2.0           # fix vol-mult, sweep others
 """
 
 import argparse
@@ -66,10 +69,40 @@ GRIDS = {
             for vm in [1.5, 2.0]
         ],
     },
+
+    # ── Bollinger Band modes (bb_sim.py) ───────────────────────────────────────
+    "bb-bands": {
+        "description": "BB period × std-dev multiplier",
+        "sim":         "bb_sim.py",
+        "params": [
+            {"--period": p, "--mult": m}
+            for p in [15, 20, 25, 30]
+            for m in [1.5, 2.0, 2.5, 3.0]
+        ],
+    },
+    "bb-squeeze": {
+        "description": "Squeeze threshold × squeeze lookback",
+        "sim":         "bb_sim.py",
+        "params": [
+            {"--squeeze": sq, "--squeeze-lookback": lb}
+            for sq in [0.7, 0.85, 1.0, 1.2]
+            for lb in [30, 50, 75, 100]
+        ],
+    },
+    "bb-sl": {
+        "description": "SL multiplier × directional cooldown",
+        "sim":         "bb_sim.py",
+        "params": [
+            {"--sl-mult": sl, "--cooldown": cd}
+            for sl in [0.5, 1.0, 1.5, 2.0]
+            for cd in [5, 10, 20, 30]
+        ],
+    },
 }
 
 # Fixed defaults used when a parameter is not being swept
 DEFAULTS = {
+    # sr_sim.py defaults
     "--vol-mult":     2.0,
     "--breakout":     0.0010,
     "--arm-distance": 0.0020,
@@ -79,15 +112,28 @@ DEFAULTS = {
     "--hold":         33,
 }
 
+BB_DEFAULTS = {
+    # bb_sim.py defaults
+    "--period":           20,
+    "--mult":             2.0,
+    "--squeeze":          1.0,
+    "--squeeze-lookback": 50,
+    "--sl-mult":          1.0,
+    "--cooldown":         10,
+    "--hold":             33,
+}
+
 
 # ── Run one simulation ────────────────────────────────────────────────────────
 
-def run_sim(fixed_args: list[str], sweep_params: dict) -> dict | None:
-    """Run sr_sim.py with given parameters. Returns parsed result or None."""
-    cmd = [sys.executable, "sr_sim.py", "--quiet"] + fixed_args
+def run_sim(fixed_args: list[str], sweep_params: dict,
+            sim_script: str = "sr_sim.py") -> dict | None:
+    """Run a simulator with given parameters. Returns parsed result or None."""
+    cmd = [sys.executable, sim_script, "--quiet"] + fixed_args
 
-    # Apply defaults, then override with sweep params
-    merged = {**DEFAULTS, **sweep_params}
+    # Pick defaults for the right simulator, then override with sweep params
+    base = BB_DEFAULTS if sim_script == "bb_sim.py" else DEFAULTS
+    merged = {**base, **sweep_params}
     for k, v in merged.items():
         cmd += [k, str(v)]
 
@@ -221,7 +267,9 @@ def main() -> None:
     args = parser.parse_args()
 
     grid = GRIDS[args.mode]
+    sim_script = grid.get("sim", "sr_sim.py")
     print(f"\nSweep mode : {args.mode} — {grid['description']}")
+    print(f"Simulator  : {sim_script}")
 
     # Build fixed args (symbol, date range)
     symbols = args.symbol or grid.get("symbol")
@@ -233,12 +281,14 @@ def main() -> None:
     if args.end:
         fixed += ["--end", args.end]
 
-    # Apply any manually fixed params over DEFAULTS
+    # Apply any manually fixed params over defaults
     overrides = {}
     for k, attr in [("--vol-mult", "vol_mult"), ("--breakout", "breakout"),
                     ("--arm-distance", "arm_distance"), ("--tp", "tp"),
-                    ("--sl", "sl")]:
-        v = getattr(args, attr, None)
+                    ("--sl", "sl"), ("--period", "period"), ("--mult", "mult"),
+                    ("--squeeze", "squeeze"), ("--sl-mult", "sl_mult"),
+                    ("--cooldown", "cooldown")]:
+        v = getattr(args, attr.lstrip("-").replace("-", "_"), None)
         if v is not None:
             overrides[k] = v
 
@@ -254,7 +304,7 @@ def main() -> None:
         merged_params = {**overrides, **sweep_params}
         param_str = "  ".join(f"{k} {v}" for k, v in sweep_params.items())
         print(f"  [{idx:>3}/{total}]  {param_str} ...", end="", flush=True)
-        result = run_sim(fixed, merged_params)
+        result = run_sim(fixed, merged_params, sim_script=sim_script)
         if result:
             results.append(result)
             print(f"  TP {result['tp_pct']:.1f}%  SL {result['sl_pct']:.1f}%  "
