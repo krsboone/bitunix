@@ -214,10 +214,10 @@ def run(csv_path: str, max_hold_mins: int | None,
     print(f"\nBacktest — {csv_path}")
     print(f"Trades parsed : {len(trades)}  |  Hold : {hold_label}")
     print(f"Fees          : taker {fee_taker*100:.3f}%  maker {fee_maker*100:.3f}%")
-    print("─" * 100)
-    print(f"{'Time':19}  {'Sym':10} {'Side':4}  {'Entry':>10} {'TP':>10} {'SL':>10} "
+    print("─" * 122)
+    print(f"{'Time':19}  {'Sym':10} {'Side':4}  {'Qty':>8}  {'Entry':>10} {'TP':>10} {'SL':>10} "
           f"{'Outcome':10} {'Mins':>5}  {'Close':>10}  {'PnL':>10}")
-    print("─" * 100)
+    print("─" * 122)
 
     results   = {"TP_HIT": 0, "SL_HIT": 0, "TIME_EXIT": 0, "NO_DATA": 0}
     total_pnl = 0.0
@@ -244,14 +244,14 @@ def run(csv_path: str, max_hold_mins: int | None,
 
         ts  = trade["entry_time"].strftime("%Y-%m-%d %H:%M:%S")
         pnl_str = f"{result['pnl']:+.4f}"
-        print(f"{ts}  {sym:10} {trade['side']:4}  "
+        print(f"{ts}  {sym:10} {trade['side']:4}  {trade['qty']:>8}  "
               f"{result['entry_price']:>10.4f} {trade['tp_price']:>10.4f} "
               f"{trade['sl_price']:>10.4f}  "
               f"{result['outcome']:10} {result['mins']:>5.1f}  "
               f"{result['close_price']:>10.4f}  {pnl_str:>10}")
 
     total = len(trades) - skipped
-    print("─" * 100)
+    print("─" * 122)
 
     if total == 0:
         print(f"\nSummary (0 trades)")
