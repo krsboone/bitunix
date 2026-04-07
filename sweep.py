@@ -70,9 +70,9 @@ GRIDS = {
         ],
     },
 
-    # ── Bollinger Band modes (bb_sim.py) ───────────────────────────────────────
+    # ── Bollinger Band modes — mean-reversion (bb_sim.py) ─────────────────────
     "bb-bands": {
-        "description": "BB period × std-dev multiplier",
+        "description": "BB period × std-dev multiplier (mean-reversion)",
         "sim":         "bb_sim.py",
         "params": [
             {"--period": p, "--mult": m}
@@ -95,6 +95,38 @@ GRIDS = {
         "params": [
             {"--sl-mult": sl, "--cooldown": cd}
             for sl in [0.5, 1.0, 1.5, 2.0]
+            for cd in [5, 10, 20, 30]
+        ],
+    },
+
+    # ── Bollinger Band modes — momentum/flip (bb_sim.py --flip) ───────────────
+    "bb-flip-bands": {
+        "description": "BB period × std-dev multiplier (momentum/flip)",
+        "sim":         "bb_sim.py",
+        "fixed":       ["--flip"],
+        "params": [
+            {"--period": p, "--mult": m}
+            for p in [15, 20, 25, 30]
+            for m in [1.5, 2.0, 2.5, 3.0]
+        ],
+    },
+    "bb-flip-tp": {
+        "description": "TP mult × SL mult (momentum/flip)",
+        "sim":         "bb_sim.py",
+        "fixed":       ["--flip"],
+        "params": [
+            {"--tp-mult": tp, "--sl-mult": sl}
+            for tp in [0.5, 1.0, 1.5, 2.0]
+            for sl in [0.5, 1.0, 1.5, 2.0]
+        ],
+    },
+    "bb-flip-squeeze": {
+        "description": "Squeeze threshold × cooldown (momentum/flip)",
+        "sim":         "bb_sim.py",
+        "fixed":       ["--flip"],
+        "params": [
+            {"--squeeze": sq, "--cooldown": cd}
+            for sq in [0.7, 0.85, 1.0, 1.2]
             for cd in [5, 10, 20, 30]
         ],
     },
@@ -271,9 +303,9 @@ def main() -> None:
     print(f"\nSweep mode : {args.mode} — {grid['description']}")
     print(f"Simulator  : {sim_script}")
 
-    # Build fixed args (symbol, date range)
+    # Build fixed args (symbol, date range, grid-level flags like --flip)
     symbols = args.symbol or grid.get("symbol")
-    fixed = []
+    fixed = list(grid.get("fixed", []))   # e.g. ["--flip"]
     if symbols:
         fixed += ["--symbol"] + symbols
     if args.start:

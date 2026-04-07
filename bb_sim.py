@@ -316,23 +316,37 @@ def run_symbol(symbol: str, candles_1m: list[dict],
         bw_avg     = sum(bw_history) / len(bw_history)
         squeeze_ok = bw <= bw_avg * args.squeeze
 
-        price = completed_5m["close"]
+        price   = completed_5m["close"]
+        tp_mult = getattr(args, "tp_mult", 1.0)
+        flip    = getattr(args, "flip", False)
 
-        if price < lower and squeeze_ok and long_blocked == 0:
-            # LONG signal — enter at next 1m open
-            sl_dist    = hw * args.sl_mult
-            pending_side = "LONG"
-            pending_tp   = sma                # midline reversion target
-            pending_sl   = lower - sl_dist    # beyond the lower band
-            state        = "ENTRY_PENDING"
+        if price < lower and squeeze_ok and (long_blocked == 0 if not flip else short_blocked == 0):
+            sl_dist = hw * args.sl_mult
+            if not flip:
+                # Mean-reversion: LONG, TP at midline, SL beyond lower band
+                pending_side = "LONG"
+                pending_tp   = sma
+                pending_sl   = lower - sl_dist
+            else:
+                # Momentum: SHORT, TP extended below, SL back above lower band
+                pending_side = "SHORT"
+                pending_tp   = lower - hw * tp_mult
+                pending_sl   = lower + sl_dist
+            state = "ENTRY_PENDING"
 
-        elif price > upper and squeeze_ok and short_blocked == 0:
-            # SHORT signal — enter at next 1m open
-            sl_dist    = hw * args.sl_mult
-            pending_side = "SHORT"
-            pending_tp   = sma                # midline reversion target
-            pending_sl   = upper + sl_dist    # beyond the upper band
-            state        = "ENTRY_PENDING"
+        elif price > upper and squeeze_ok and (short_blocked == 0 if not flip else long_blocked == 0):
+            sl_dist = hw * args.sl_mult
+            if not flip:
+                # Mean-reversion: SHORT, TP at midline, SL beyond upper band
+                pending_side = "SHORT"
+                pending_tp   = sma
+                pending_sl   = upper + sl_dist
+            else:
+                # Momentum: LONG, TP extended above, SL back below upper band
+                pending_side = "LONG"
+                pending_tp   = upper + hw * tp_mult
+                pending_sl   = upper - sl_dist
+            state = "ENTRY_PENDING"
 
     return trades
 
@@ -372,6 +386,11 @@ def main() -> None:
     parser.add_argument("--hold", type=int, default=MAX_HOLD_MINS,
                         help=f"Max hold minutes (default: {MAX_HOLD_MINS})")
 
+    parser.add_argument("--flip", action="store_true",
+                        help="Momentum mode: enter in direction of band touch "
+                             "instead of mean-reversion")
+    parser.add_argument("--tp-mult", dest="tp_mult", type=float, default=1.0,
+                        help="(flip mode) TP = tp_mult × half_band_width beyond band (default: 1.0)")
     parser.add_argument("--quiet", action="store_true",
                         help="Suppress progress and trade table (summary only)")
 
@@ -383,13 +402,16 @@ def main() -> None:
     end_date   = date.fromisoformat(args.end)   if args.end   else None
 
     if not quiet:
-        print(f"\nBollinger Band Simulator")
+        mode_label = "MOMENTUM (--flip)" if args.flip else "mean-reversion"
+        print(f"\nBollinger Band Simulator  [{mode_label}]")
         print(f"  Symbols     : {', '.join(symbols)}")
         if start_date or end_date:
             print(f"  Date range  : {args.start or 'start'} → {args.end or 'now'}")
         print(f"  BB          : period={args.period}  mult={args.mult}×")
         print(f"  Squeeze     : threshold={args.squeeze}  lookback={args.squeeze_lookback}")
         print(f"  SL mult     : {args.sl_mult}×  cooldown={args.cooldown} 5m-candles")
+        if args.flip:
+            print(f"  TP mult     : {args.tp_mult}× (beyond band)")
         print(f"  Hold        : ≤{args.hold}min")
         print()
 
