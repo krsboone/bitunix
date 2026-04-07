@@ -289,12 +289,20 @@ def main() -> None:
     parser.add_argument("--start",  metavar="YYYY-MM-DD")
     parser.add_argument("--end",    metavar="YYYY-MM-DD")
 
-    # Allow fixing individual params when sweeping others
+    # Allow fixing individual params when sweeping others (sr_sim.py)
     parser.add_argument("--vol-mult",     type=float)
     parser.add_argument("--breakout",     type=float)
     parser.add_argument("--arm-distance", type=float)
     parser.add_argument("--tp",           type=float)
     parser.add_argument("--sl",           type=float)
+
+    # Allow fixing individual params when sweeping others (bb_sim.py)
+    parser.add_argument("--period",       type=int)
+    parser.add_argument("--mult",         type=float)
+    parser.add_argument("--squeeze",      type=float)
+    parser.add_argument("--sl-mult",      type=float)
+    parser.add_argument("--cooldown",     type=int)
+    parser.add_argument("--tp-mult",      type=float)
 
     args = parser.parse_args()
 
