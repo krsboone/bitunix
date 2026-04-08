@@ -165,8 +165,28 @@ GRIDS = {
         ],
     },
     "vol-spike-tp": {
-        "description": "TP mult × SL mult (volume spike)",
+        "description": "TP mult × SL mult (volume spike momentum)",
         "sim":         "vol_spike_sim.py",
+        "params": [
+            {"--tp-mult": tp, "--sl-mult": sl}
+            for tp in [0.5, 1.0, 1.5, 2.0, 3.0]
+            for sl in [0.5, 1.0, 1.5, 2.0]
+        ],
+    },
+    "vol-spike-flip": {
+        "description": "Spike multiplier × ATR period (reversion/flip mode)",
+        "sim":         "vol_spike_sim.py",
+        "fixed":       ["--flip"],
+        "params": [
+            {"--spike-mult": sm, "--atr-period": ap}
+            for sm in [1.5, 2.0, 2.5, 3.0, 4.0]
+            for ap in [7, 14, 20, 30]
+        ],
+    },
+    "vol-spike-flip-tp": {
+        "description": "TP mult × SL mult (volume spike reversion)",
+        "sim":         "vol_spike_sim.py",
+        "fixed":       ["--flip"],
         "params": [
             {"--tp-mult": tp, "--sl-mult": sl}
             for tp in [0.5, 1.0, 1.5, 2.0, 3.0]

@@ -227,15 +227,17 @@ def run_symbol(symbol: str, candles: list[dict],
         tp_dist = atr * args.tp_mult
         sl_dist = atr * args.sl_mult
 
-        if body > 0:
-            # Bullish spike → LONG
+        flip = getattr(args, "flip", False)
+
+        if (body > 0) != flip:
+            # Bullish spike → LONG (or bearish spike → LONG in flip/reversion mode)
             if long_blocked > 0:
                 continue
             pending_side = "LONG"
             pending_tp   = price + tp_dist
             pending_sl   = price - sl_dist
         else:
-            # Bearish spike → SHORT
+            # Bearish spike → SHORT (or bullish spike → SHORT in flip/reversion mode)
             if short_blocked > 0:
                 continue
             pending_side = "SHORT"
@@ -311,6 +313,8 @@ def main() -> None:
                         help=f"Max hold minutes (default: {MAX_HOLD_MINS})")
     parser.add_argument("--cooldown", type=int, default=COOLDOWN,
                         help=f"Candles to block re-entry after SL (default: {COOLDOWN})")
+    parser.add_argument("--flip", action="store_true",
+                        help="Reversion mode: enter opposite to spike direction")
     parser.add_argument("--quiet", action="store_true",
                         help="Suppress progress and trade table (summary only)")
 
@@ -322,7 +326,8 @@ def main() -> None:
     end_date   = date.fromisoformat(args.end)   if args.end   else None
 
     if not quiet:
-        print(f"\nVolume Spike Momentum Simulator")
+        mode = "REVERSION (--flip)" if args.flip else "MOMENTUM"
+        print(f"\nVolume Spike Simulator  [{mode}]")
         print(f"  Symbols    : {', '.join(symbols)}")
         if start_date or end_date:
             print(f"  Date range : {args.start or 'start'} → {args.end or 'now'}")
