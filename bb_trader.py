@@ -65,7 +65,6 @@ MARGIN_COIN      = "USDT"
 INTERVAL         = "1m"
 MAX_TRADE_PCT    = 0.10    # 10% of balance per trade
 POLL_SECS        = 60      # 1-minute candle rhythm
-INIT_PAGES       = 2       # pages × 1000 1m candles on startup (~33h)
 
 FEE_TAKER        = 0.00060
 FEE_MAKER        = 0.00060
@@ -148,6 +147,65 @@ def fetch_latest_candles(client: BitunixClient, symbol: str,
     if resp.get("code") != 0:
         raise RuntimeError(f"Kline error: {resp.get('msg')}")
     return [normalize(c) for c in resp.get("data", [])]
+
+
+def load_candles_csv(symbol: str) -> list[dict]:
+    """Load locally-cached 1m candles from fetch_data.py CSV, sorted ascending."""
+    import csv as _csv
+    path = os.path.join("data", f"{symbol}_1m.csv")
+    if not os.path.exists(path):
+        return []
+    candles = []
+    with open(path, "r") as f:
+        reader = _csv.DictReader(f)
+        for row in reader:
+            candles.append({
+                "time":   int(row["timestamp_ms"]),
+                "open":   float(row["open"]),
+                "high":   float(row["high"]),
+                "low":    float(row["low"]),
+                "close":  float(row["close"]),
+                "volume": float(row["volume"]),
+            })
+    candles.sort(key=lambda c: c["time"])
+    return candles
+
+
+def fetch_gap_candles(client: BitunixClient, symbol: str,
+                      after_ms: int) -> list[dict]:
+    """Fetch all 1m candles from after_ms up to now via paged API calls."""
+    now_ms = int(now_utc().timestamp() * 1000)
+    end_ms = now_ms
+    raw    = []
+
+    while True:
+        resp = client.get("/api/v1/futures/market/kline", {
+            "symbol":    symbol,
+            "interval":  INTERVAL,
+            "limit":     "1000",
+            "endTime":   str(end_ms),
+        })
+        if resp.get("code") != 0:
+            raise RuntimeError(f"Kline error: {resp.get('msg')}")
+        batch = resp.get("data", [])
+        if not batch:
+            break
+        # Keep only candles newer than the CSV
+        batch = [c for c in batch if int(c["time"]) > after_ms]
+        raw.extend(batch)
+        oldest = min(int(c["time"]) for c in resp["data"])
+        if oldest <= after_ms:
+            break
+        end_ms = oldest - 1
+
+    seen, candles = set(), []
+    for c in raw:
+        ts = int(c["time"])
+        if ts not in seen:
+            seen.add(ts)
+            candles.append(normalize(c))
+    candles.sort(key=lambda c: c["time"])
+    return candles
 
 
 # ── 5m resampling ──────────────────────────────────────────────────────────────
@@ -578,18 +636,37 @@ def run(debug: bool, symbols: list[str] = None) -> None:
     # ── Initialise per-symbol state ────────────────────────────────────────────
     sym_state: dict[str, dict] = {}
     for sym in active:
-        log.info(f"  {sym}: fetching history for 5m warm-up...")
-        candles_1m = fetch_candles_paged(client, sym, pages=INIT_PAGES)
+        cfg = SYMBOL_CONFIGS.get(sym, {"period": 20, "mult": 1.5})
+
+        # 1. Load full local CSV history for accurate bw_avg calibration
+        csv_candles = load_candles_csv(sym)
+        if csv_candles:
+            log.info(f"  {sym}: {len(csv_candles):,} candles from local CSV  "
+                     f"({datetime.fromtimestamp(csv_candles[0]['time']/1000, tz=timezone.utc).strftime('%Y-%m-%d')} "
+                     f"→ {datetime.fromtimestamp(csv_candles[-1]['time']/1000, tz=timezone.utc).strftime('%Y-%m-%d')})")
+            # 2. Gap-fill from CSV end to now via API
+            log.info(f"  {sym}: fetching gap candles from API...")
+            gap_candles = fetch_gap_candles(client, sym, csv_candles[-1]["time"])
+            log.info(f"  {sym}: {len(gap_candles)} gap candles fetched")
+            candles_1m = csv_candles + gap_candles
+        else:
+            # No local CSV — fall back to API pages
+            log.info(f"  {sym}: no local CSV found, fetching from API...")
+            candles_1m = fetch_candles_paged(client, sym, pages=2)
+            log.info(f"  {sym}: {len(candles_1m)} candles fetched from API")
+
+        # 3. Build 5m buffer and bw_history from full dataset
         buf_5m, current_5m, current_bucket = build_5m_buf(candles_1m)
 
-        # Pre-build bw_history from buf_5m
-        cfg        = SYMBOL_CONFIGS.get(sym, {"period": 20, "mult": 1.5})
         bw_history = []
         for i in range(cfg["period"], len(buf_5m)):
             sma, _, _, hw = bollinger(buf_5m[:i+1], cfg["period"], cfg["mult"])
             if sma:
                 bw_history.append(band_width(sma, hw))
         bw_history = bw_history[-SQUEEZE_LOOKBACK:]
+
+        # 4. Trim buf_5m for memory — keep enough for BB calculation
+        buf_5m = buf_5m[-(max(cfg["period"], SQUEEZE_LOOKBACK) + 50):]
 
         sym_state[sym] = {
             "buf_5m":         buf_5m,
@@ -606,8 +683,8 @@ def run(debug: bool, symbols: list[str] = None) -> None:
             "long_blocked":   0,
             "short_blocked":  0,
         }
-        log.info(f"  {sym}: {len(buf_5m)} completed 5m candles  "
-                 f"bw_history={len(bw_history)} — ready")
+        log.info(f"  {sym}: {len(buf_5m)} 5m candles in buf  "
+                 f"bw_history={len(bw_history)} entries — ready")
 
     # ── Hydrate open positions from exchange ───────────────────────────────────
     if not debug:
