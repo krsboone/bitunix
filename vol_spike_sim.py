@@ -142,6 +142,10 @@ def run_symbol(symbol: str, candles: list[dict],
     trade_side     = None
     trade_open_ts  = None
 
+    # Incremental rolling windows — avoids O(n²) candles[:i] slices
+    vol_window = []   # rolling volume window (length = vol_lookback)
+    atr_window = []   # rolling candle window for ATR (length = atr_period + 1)
+
     for i, c in enumerate(candles):
         if not quiet and i % step == 0:
             pct = i / len(candles) * 100
@@ -150,6 +154,14 @@ def run_symbol(symbol: str, candles: list[dict],
 
         ts    = c["time"]
         price = c["close"]
+
+        # Maintain incremental windows
+        vol_window.append(c["volume"])
+        if len(vol_window) > args.vol_lookback:
+            vol_window.pop(0)
+        atr_window.append(c)
+        if len(atr_window) > args.atr_period + 2:
+            atr_window.pop(0)
 
         if i < MIN_HISTORY:
             continue
@@ -208,9 +220,10 @@ def run_symbol(symbol: str, candles: list[dict],
         if short_blocked > 0: short_blocked -= 1
 
         # ── WATCHING: check for volume spike signal ────────────────────────────
-        prior     = candles[:i]
-        vol_avg   = rolling_vol_avg(prior, args.vol_lookback)
-        vol_now   = c["volume"]
+        # Use incremental windows — O(1) per candle instead of O(n)
+        vols    = [v for v in vol_window[:-1] if v > 0]  # exclude current candle
+        vol_avg = sum(vols) / len(vols) if vols else 0
+        vol_now = c["volume"]
 
         if vol_avg == 0 or vol_now < vol_avg * args.spike_mult:
             continue
@@ -220,7 +233,7 @@ def run_symbol(symbol: str, candles: list[dict],
         if body == 0:
             continue
 
-        atr = compute_atr(prior, args.atr_period)
+        atr = compute_atr(atr_window[:-1], args.atr_period)
         if atr == 0:
             continue
 

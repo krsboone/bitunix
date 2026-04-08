@@ -147,6 +147,10 @@ def run_symbol(symbol: str, candles: list[dict],
     trade_side     = None
     trade_open_ts  = None
 
+    # Incremental rolling windows — avoids O(n²) candles[:i] slices
+    vol_window = []   # rolling volume window (length = vol_lookback)
+    atr_window = []   # rolling candle window for ATR (length = atr_period + 1)
+
     for i, c in enumerate(candles):
         if not quiet and i % step == 0:
             pct = i / len(candles) * 100
@@ -155,6 +159,14 @@ def run_symbol(symbol: str, candles: list[dict],
 
         ts    = c["time"]
         price = c["close"]
+
+        # Maintain incremental windows
+        vol_window.append(c["volume"])
+        if len(vol_window) > args.vol_lookback:
+            vol_window.pop(0)
+        atr_window.append(c)
+        if len(atr_window) > args.atr_period + 2:
+            atr_window.pop(0)
 
         if i < min_hist:
             continue
@@ -222,14 +234,14 @@ def run_symbol(symbol: str, candles: list[dict],
         streak_dir = dirs[-1]           # +1 = up streak, -1 = down streak
 
         # Condition 2: final candle of streak has elevated volume
-        prior_vols = [candles[j]["volume"] for j in range(i - args.vol_lookback, i)]
+        prior_vols = [v for v in vol_window[:-1] if v > 0]
         avg_vol    = sum(prior_vols) / len(prior_vols) if prior_vols else 0
         final_vol  = streak_window[-1]["volume"]
         if avg_vol == 0 or final_vol < avg_vol * args.vol_mult:
             continue
 
         # Condition 3: ATR available for sizing
-        atr = compute_atr(candles[:i], args.atr_period)
+        atr = compute_atr(atr_window[:-1], args.atr_period)
         if atr == 0:
             continue
 
