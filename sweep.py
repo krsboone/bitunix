@@ -218,6 +218,46 @@ BB_DEFAULTS = {
     "--hold":             33,
 }
 
+VWAP_DEFAULTS = {
+    # vwap_sim.py defaults
+    "--dev":      0.002,
+    "--tp-mult":  1.0,
+    "--sl-mult":  1.0,
+    "--hold":     33,
+    "--cooldown": 10,
+}
+
+VOL_SPIKE_DEFAULTS = {
+    # vol_spike_sim.py defaults
+    "--spike-mult":   2.0,
+    "--vol-lookback": 20,
+    "--atr-period":   14,
+    "--tp-mult":      1.5,
+    "--sl-mult":      1.0,
+    "--hold":         33,
+    "--cooldown":     10,
+}
+
+EXHAUST_DEFAULTS = {
+    # exhaustion_sim.py defaults
+    "--streak":       4,
+    "--vol-mult":     1.5,
+    "--vol-lookback": 20,
+    "--atr-period":   14,
+    "--tp-mult":      1.5,
+    "--sl-mult":      1.0,
+    "--hold":         33,
+    "--cooldown":     10,
+}
+
+SIM_DEFAULTS = {
+    "sr_sim.py":          DEFAULTS,
+    "bb_sim.py":          BB_DEFAULTS,
+    "vwap_sim.py":        VWAP_DEFAULTS,
+    "vol_spike_sim.py":   VOL_SPIKE_DEFAULTS,
+    "exhaustion_sim.py":  EXHAUST_DEFAULTS,
+}
+
 
 # ── Run one simulation ────────────────────────────────────────────────────────
 
@@ -227,7 +267,7 @@ def run_sim(fixed_args: list[str], sweep_params: dict,
     cmd = [sys.executable, sim_script, "--quiet"] + fixed_args
 
     # Pick defaults for the right simulator, then override with sweep params
-    base = BB_DEFAULTS if sim_script == "bb_sim.py" else DEFAULTS
+    base   = SIM_DEFAULTS.get(sim_script, DEFAULTS)
     merged = {**base, **sweep_params}
     for k, v in merged.items():
         cmd += [k, str(v)]
