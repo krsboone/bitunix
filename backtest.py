@@ -100,14 +100,23 @@ def parse_row(row: list[str]) -> dict | None:
         entry_time = datetime.strptime(raw_ts, "%Y-%m-%d %H:%M:%S").replace(
             tzinfo=timezone.utc)
 
+        def get_opt(key):
+            try:
+                return fields[fields.index(key) + 1]
+            except ValueError:
+                return None
+
+        entry_price_logged = get_opt("entryPrice")
+
         return {
-            "entry_time": entry_time,
-            "entry_ts":   int(entry_time.timestamp() * 1000),
-            "symbol":     get("symbol"),
-            "side":       get("side"),        # BUY or SELL
-            "qty":        float(get("qty")),
-            "tp_price":   float(get("tpPrice")),
-            "sl_price":   float(get("slPrice")),
+            "entry_time":          entry_time,
+            "entry_ts":            int(entry_time.timestamp() * 1000),
+            "symbol":              get("symbol"),
+            "side":                get("side"),        # BUY or SELL
+            "qty":                 float(get("qty")),
+            "tp_price":            float(get("tpPrice")),
+            "sl_price":            float(get("slPrice")),
+            "entry_price_logged":  float(entry_price_logged) if entry_price_logged else None,
         }
     except Exception:
         return None
@@ -120,7 +129,7 @@ def evaluate_trade(trade: dict, candles: list[dict],
                    fee_taker: float, fee_maker: float) -> dict:
     """
     Walk candles forward from entry. Returns result dict:
-      outcome, mins, close_price, pnl (after fees), entry_price_est
+      outcome, mins, close_price, pnl (after fees), entry_price
     """
     tp      = trade["tp_price"]
     sl      = trade["sl_price"]
@@ -128,8 +137,11 @@ def evaluate_trade(trade: dict, candles: list[dict],
     qty     = trade["qty"]
     entry_time = trade["entry_time"]
 
-    # Estimate entry price as the open of the first candle at/after entry
-    entry_price = candles[0]["open"] if candles else (tp + sl) / 2
+    # Use logged entry price if available; fall back to first candle open
+    if trade.get("entry_price_logged") is not None:
+        entry_price = trade["entry_price_logged"]
+    else:
+        entry_price = candles[0]["open"] if candles else (tp + sl) / 2
 
     def calc_pnl(close_price: float, exit_fee_rate: float) -> float:
         direction = 1 if is_long else -1

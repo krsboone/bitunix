@@ -322,6 +322,7 @@ def log_trade(body: dict) -> None:
         "slPrice",    body["sl_price"],
         "tpStopType", "MARK_PRICE",
         "slStopType", "MARK_PRICE",
+        "entryPrice", body["entry_price"],
     ]
     with open(TRADE_CSV, "a", newline="") as f:
         csv.writer(f).writerow(row)
@@ -512,11 +513,12 @@ def _enter_pending(client: BitunixClient, sym: str, s: dict,
         return
 
     log_trade({
-        "symbol":    sym,
-        "side":      side,
-        "qty":       qty,
-        "tp_price":  round_price(sym, tp_price),
-        "sl_price":  round_price(sym, sl_price),
+        "symbol":      sym,
+        "side":        side,
+        "qty":         qty,
+        "tp_price":    round_price(sym, tp_price),
+        "sl_price":    round_price(sym, sl_price),
+        "entry_price": entry_price,
     })
 
     s["state"]    = "IN_TRADE"

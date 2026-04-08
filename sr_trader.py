@@ -292,6 +292,7 @@ def log_trade(body: dict) -> None:
         "slPrice",    body.get("sl_price"),
         "tpStopType", "MARK_PRICE",
         "slStopType", "MARK_PRICE",
+        "entryPrice", body.get("entry_price"),
     ]
     with open(TRADE_CSV, "a", newline="") as f:
         csv.writer(f).writerow(row)
