@@ -173,6 +173,26 @@ GRIDS = {
             for sl in [0.5, 1.0, 1.5, 2.0]
         ],
     },
+
+    # ── Momentum exhaustion modes (exhaustion_sim.py) ─────────────────────────
+    "exhaust-core": {
+        "description": "Streak length × volume multiplier",
+        "sim":         "exhaustion_sim.py",
+        "params": [
+            {"--streak": s, "--vol-mult": vm}
+            for s  in [3, 4, 5, 6]
+            for vm in [1.2, 1.5, 2.0, 2.5, 3.0]
+        ],
+    },
+    "exhaust-tp": {
+        "description": "TP mult × SL mult (exhaustion)",
+        "sim":         "exhaustion_sim.py",
+        "params": [
+            {"--tp-mult": tp, "--sl-mult": sl}
+            for tp in [0.5, 1.0, 1.5, 2.0, 2.5]
+            for sl in [0.5, 1.0, 1.5, 2.0]
+        ],
+    },
 }
 
 # Fixed defaults used when a parameter is not being swept
