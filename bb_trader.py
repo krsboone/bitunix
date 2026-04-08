@@ -472,7 +472,7 @@ def _enter_pending(client: BitunixClient, sym: str, s: dict,
         "opened_at":   now_utc(),
         "debug":       debug,
     }
-    s["pending_side"] = s["pending_tp"] = s["pending_sl"] = None
+    s["pending_side"] = s["pending_hw"] = None
 
 
 def _monitor_trade(client: BitunixClient, sym: str, s: dict,
