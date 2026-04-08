@@ -130,6 +130,49 @@ GRIDS = {
             for cd in [5, 10, 20, 30]
         ],
     },
+
+    # ── VWAP deviation modes (vwap_sim.py) ───────────────────────────────────
+    "vwap-dev": {
+        "description": "VWAP dev threshold × TP/SL multipliers (momentum)",
+        "sim":         "vwap_sim.py",
+        "params": [
+            {"--dev": dev, "--tp-mult": tp, "--sl-mult": sl}
+            for dev in [0.001, 0.002, 0.003, 0.005]
+            for tp  in [0.5, 1.0, 1.5, 2.0]
+            for sl  in [0.5, 1.0, 1.5, 2.0]
+        ],
+    },
+    "vwap-revert": {
+        "description": "VWAP dev threshold × TP/SL multipliers (reversion)",
+        "sim":         "vwap_sim.py",
+        "fixed":       ["--revert"],
+        "params": [
+            {"--dev": dev, "--tp-mult": tp, "--sl-mult": sl}
+            for dev in [0.001, 0.002, 0.003, 0.005]
+            for tp  in [0.5, 1.0, 1.5, 2.0]
+            for sl  in [0.5, 1.0, 1.5, 2.0]
+        ],
+    },
+
+    # ── Volume spike modes (vol_spike_sim.py) ─────────────────────────────────
+    "vol-spike": {
+        "description": "Spike multiplier × ATR period",
+        "sim":         "vol_spike_sim.py",
+        "params": [
+            {"--spike-mult": sm, "--atr-period": ap}
+            for sm in [1.5, 2.0, 2.5, 3.0, 4.0]
+            for ap in [7, 14, 20, 30]
+        ],
+    },
+    "vol-spike-tp": {
+        "description": "TP mult × SL mult (volume spike)",
+        "sim":         "vol_spike_sim.py",
+        "params": [
+            {"--tp-mult": tp, "--sl-mult": sl}
+            for tp in [0.5, 1.0, 1.5, 2.0, 3.0]
+            for sl in [0.5, 1.0, 1.5, 2.0]
+        ],
+    },
 }
 
 # Fixed defaults used when a parameter is not being swept
