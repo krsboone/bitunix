@@ -21,27 +21,41 @@ import re
 
 SYMBOLS_DEFAULT = ["BTCUSDT", "ETHUSDT"]
 
-# Fixed sim parameters (match bb_trader defaults)
-SIM_PERIOD  = None   # uses per-symbol default when None
-SIM_MULT    = 1.5
-SIM_TP_MULT = 1.0
-SIM_SL_MULT = 2.0
+# Sim presets: name → (script, fixed_args, tp_mult, sl_mult)
+# tp_mult and sl_mult are used for EV calculation and must match what's passed in fixed_args.
+SIM_PRESETS = {
+    "bb": {
+        "script":    "bb_sim.py",
+        "args":      ["--flip", "--mult", "1.5", "--tp-mult", "1.0", "--sl-mult", "2.0"],
+        "tp_mult":   1.0,
+        "sl_mult":   2.0,
+    },
+    "vol_spike": {
+        "script":    "vol_spike_sim.py",
+        "args":      ["--flip", "--tp-mult", "1.5", "--sl-mult", "1.0"],
+        "tp_mult":   1.5,
+        "sl_mult":   1.0,
+    },
+    "exhaustion": {
+        "script":    "exhaustion_sim.py",
+        "args":      ["--tp-mult", "1.0", "--sl-mult", "1.0"],
+        "tp_mult":   1.0,
+        "sl_mult":   1.0,
+    },
+}
 
 
 def run_sim(symbol: str, start_hour: int, end_hour: int,
-            skip_weekends: bool, extra_args: list[str]) -> dict | None:
-    """Run bb_sim.py for one combination. Returns result dict or None on failure."""
+            skip_weekends: bool, extra_args: list[str],
+            preset: dict) -> dict | None:
+    """Run a sim script for one combination. Returns result dict or None on failure."""
     cmd = [
-        sys.executable, "bb_sim.py",
-        "--flip",
-        "--mult",    str(SIM_MULT),
-        "--tp-mult", str(SIM_TP_MULT),
-        "--sl-mult", str(SIM_SL_MULT),
+        sys.executable, preset["script"],
         "--symbol",  symbol,
         "--start-hour", str(start_hour),
         "--end-hour",   str(end_hour),
         "--quiet",
-    ]
+    ] + preset["args"]
     if skip_weekends:
         cmd += ["--skip-days", "sat,sun"]
     cmd += extra_args
@@ -66,8 +80,8 @@ def run_sim(symbol: str, start_hour: int, end_hour: int,
     sl_pct = float(m_sl.group(1))
     tx_pct = float(m_tx.group(1)) if m_tx else 0.0
 
-    # EV in half-band-width units: tp_rate * tp_mult - sl_rate * sl_mult
-    ev = (tp_pct / 100) * SIM_TP_MULT - (sl_pct / 100) * SIM_SL_MULT
+    # EV: tp_rate * tp_mult - sl_rate * sl_mult
+    ev = (tp_pct / 100) * preset["tp_mult"] - (sl_pct / 100) * preset["sl_mult"]
 
     return {
         "symbol":   symbol,
@@ -91,6 +105,8 @@ def fmt_window(start: int, end: int) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Sweep bb_sim.py over UTC hour windows and day combinations")
+    parser.add_argument("--sim", choices=list(SIM_PRESETS.keys()), default="bb",
+                        help="Simulator to sweep: bb, vol_spike, exhaustion (default: bb)")
     parser.add_argument("--symbol", nargs="+", metavar="SYMBOL",
                         default=SYMBOLS_DEFAULT,
                         help=f"Symbol(s) to test (default: {' '.join(SYMBOLS_DEFAULT)})")
@@ -110,6 +126,7 @@ def main() -> None:
                         help="Pass --end to bb_sim.py")
     args = parser.parse_args()
 
+    preset = SIM_PRESETS[args.sim]
     extra = []
     if args.start: extra += ["--start", args.start]
     if args.end:   extra += ["--end",   args.end]
@@ -139,7 +156,7 @@ def main() -> None:
             print(f"  [{n:>4}/{total}]  {sym}  {fmt_window(start, end)}  "
                   f"({window}h)  {day_label} ...", end=" ", flush=True)
 
-            r = run_sim(sym, start, end, skip_wknd, extra)
+            r = run_sim(sym, start, end, skip_wknd, extra, preset)
             if r is None or r["trades"] < args.min_trades:
                 print(f"skip (trades={r['trades'] if r else 0})")
                 continue
@@ -166,7 +183,7 @@ def main() -> None:
     top = results[:args.top]
     print(f"\n{'─' * 85}")
     print(f"  Top {args.top} by {args.sort.upper()}  |  "
-          f"sim params: mult={SIM_MULT}  tp={SIM_TP_MULT}  sl={SIM_SL_MULT}")
+          f"sim={args.sim}  tp={preset['tp_mult']}  sl={preset['sl_mult']}")
     print(f"{'─' * 85}")
     print(f"  {'Rank':>4}  {'Sym':<8} {'Window':<14} {'Days':<10} "
           f"{'Trades':>7} {'TP%':>7} {'SL%':>6} {'TX%':>6}  {'EV':>8}")
