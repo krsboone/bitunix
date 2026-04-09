@@ -14,7 +14,7 @@ Strategy: BB band-touch momentum (--flip mode from bb_sim.py)
 Per-symbol sweep-optimised parameters (30-day walk-forward + 7-day holdout):
   BTCUSDT: period=30  mult=1.5  (holdout TP 80.1%  SL 5.2%  score 74.9)
   ETHUSDT: period=20  mult=1.5  (holdout TP 82.3%  SL 5.6%  score 76.7)
-  Shared:  tp_mult=0.5  sl_mult=2.0  squeeze=1.0  cooldown=5
+  Shared:  tp_mult=1.0  sl_mult=2.0  squeeze=1.0  cooldown=5
 
 Usage:
     python3 bb_trader.py              # live trading
@@ -48,7 +48,7 @@ SYMBOLS = list(SYMBOL_CONFIGS.keys())
 
 # ── Shared strategy parameters ─────────────────────────────────────────────────
 
-TP_MULT          = 0.5    # TP = tp_mult × half_band_width beyond the band
+TP_MULT          = 1.0    # TP = tp_mult × half_band_width beyond the band
 SL_MULT          = 2.0    # SL = sl_mult × half_band_width back inside the band
 SQUEEZE_THRESH   = 1.0    # enter only when bw ≤ bw_rolling_avg × threshold
 SQUEEZE_LOOKBACK = 50     # 5m candles for rolling band-width average
