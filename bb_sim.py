@@ -302,6 +302,24 @@ def run_symbol(symbol: str, candles_1m: list[dict],
         if completed_5m is None or len(buf_5m) < MIN_HISTORY_5M:
             continue
 
+        # Time-of-day and day-of-week filter
+        candle_dt  = datetime.fromtimestamp(completed_5m["time"] / 1000, tz=timezone.utc)
+        candle_hour = candle_dt.hour
+        candle_dow  = candle_dt.weekday()  # 0=Mon … 6=Sun
+
+        if hasattr(args, "start_hour") and args.start_hour is not None:
+            if hasattr(args, "end_hour") and args.end_hour is not None:
+                if args.start_hour <= args.end_hour:
+                    if not (args.start_hour <= candle_hour < args.end_hour):
+                        continue
+                else:  # wraps midnight e.g. 22–06
+                    if not (candle_hour >= args.start_hour or candle_hour < args.end_hour):
+                        continue
+
+        if hasattr(args, "skip_days") and args.skip_days:
+            if candle_dow in args.skip_days:
+                continue
+
         sma, upper, lower, hw = bollinger(buf_5m, args.period, args.mult)
         if sma is None:
             continue
@@ -391,6 +409,13 @@ def main() -> None:
                              "instead of mean-reversion")
     parser.add_argument("--tp-mult", dest="tp_mult", type=float, default=1.0,
                         help="(flip mode) TP = tp_mult × half_band_width beyond band (default: 1.0)")
+    parser.add_argument("--start-hour", dest="start_hour", type=int, default=None,
+                        metavar="H", help="Only enter trades at/after this UTC hour (0-23)")
+    parser.add_argument("--end-hour", dest="end_hour", type=int, default=None,
+                        metavar="H", help="Only enter trades before this UTC hour (0-23)")
+    parser.add_argument("--skip-days", dest="skip_days_str", type=str, default=None,
+                        metavar="DAYS",
+                        help="Comma-separated days to skip entries (mon,tue,wed,thu,fri,sat,sun)")
     parser.add_argument("--quiet", action="store_true",
                         help="Suppress progress and trade table (summary only)")
 
@@ -400,6 +425,17 @@ def main() -> None:
 
     start_date = date.fromisoformat(args.start) if args.start else None
     end_date   = date.fromisoformat(args.end)   if args.end   else None
+
+    # Parse --skip-days into set of weekday ints (0=Mon … 6=Sun)
+    _day_map = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+    args.skip_days = set()
+    if args.skip_days_str:
+        for d in args.skip_days_str.lower().split(","):
+            d = d.strip()
+            if d in _day_map:
+                args.skip_days.add(_day_map[d])
+            else:
+                print(f"  Warning: unknown day '{d}' — use mon,tue,wed,thu,fri,sat,sun")
 
     if not quiet:
         mode_label = "MOMENTUM (--flip)" if args.flip else "mean-reversion"
@@ -413,6 +449,14 @@ def main() -> None:
         if args.flip:
             print(f"  TP mult     : {args.tp_mult}× (beyond band)")
         print(f"  Hold        : ≤{args.hold}min")
+        if args.start_hour is not None or args.end_hour is not None:
+            sh = f"{args.start_hour:02d}:00" if args.start_hour is not None else "00:00"
+            eh = f"{args.end_hour:02d}:00"   if args.end_hour   is not None else "24:00"
+            print(f"  Trade hours : {sh} → {eh} UTC")
+        if args.skip_days:
+            _day_names = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
+            skipped = ", ".join(_day_names[d] for d in sorted(args.skip_days))
+            print(f"  Skip days   : {skipped}")
         print()
 
     all_trades = []
