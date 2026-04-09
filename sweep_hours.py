@@ -49,6 +49,13 @@ SIM_PRESETS = {
         "tp_mult":   1.0,
         "sl_mult":   3.0,
     },
+    "sr-eth": {
+        "script":    "sr_sim.py",
+        "args":      ["--tp", "1.0", "--sl", "3.0", "--vol-mult", "3.0",
+                      "--breakout", "0.0015", "--arm-distance", "0.003"],
+        "tp_mult":   1.0,
+        "sl_mult":   3.0,
+    },
 }
 
 
@@ -113,7 +120,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Sweep bb_sim.py over UTC hour windows and day combinations")
     parser.add_argument("--sim", choices=list(SIM_PRESETS.keys()), default="bb",
-                        help="Simulator to sweep: bb, vol_spike, exhaustion, sr (default: bb)")
+                        help="Simulator to sweep: bb, vol_spike, exhaustion, sr, sr-eth (default: bb)")
     parser.add_argument("--symbol", nargs="+", metavar="SYMBOL",
                         default=SYMBOLS_DEFAULT,
                         help=f"Symbol(s) to test (default: {' '.join(SYMBOLS_DEFAULT)})")
