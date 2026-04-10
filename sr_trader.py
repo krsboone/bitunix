@@ -41,8 +41,20 @@ start_logging("sr_trader")
 # ── Per-symbol sweep-optimised config ─────────────────────────────────────────
 
 SYMBOL_CONFIGS = {
-    "BTCUSDT": {"vol_mult": 2.0, "breakout": 0.0010, "arm_distance": 0.0015},
-    "ETHUSDT": {"vol_mult": 3.0, "breakout": 0.0015, "arm_distance": 0.0030},
+    "BTCUSDT": {
+        "vol_mult":    2.0,
+        "breakout":    0.0010,
+        "arm_distance": 0.0015,
+        "windows":     [(6, 9)],   # 06:00–09:00 UTC Mon-Fri
+        "skip_days":   {5, 6},     # Sat, Sun
+    },
+    "ETHUSDT": {
+        "vol_mult":    3.0,
+        "breakout":    0.0015,
+        "arm_distance": 0.0030,
+        "windows":     [(7, 9)],   # 07:00–09:00 UTC Mon-Fri
+        "skip_days":   {5, 6},     # Sat, Sun
+    },
 }
 SYMBOLS = list(SYMBOL_CONFIGS.keys())
 
@@ -355,11 +367,20 @@ def run(debug: bool, symbols: list[str] = None) -> None:
         log.info("  MODE      : DEBUG — no real orders")
     log.info("━" * 60)
 
+    _day_names = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
     for sym in active:
-        cfg = SYMBOL_CONFIGS.get(sym, {})
+        cfg     = SYMBOL_CONFIGS.get(sym, {})
+        windows = cfg.get("windows")
+        if windows:
+            hrs = "  ".join(f"{sh:02d}:00–{eh:02d}:00" for sh, eh in windows) + " UTC"
+        else:
+            hrs = "all hours"
+        skip = cfg.get("skip_days", set())
+        days = ", ".join(_day_names[d] for d in sorted(skip)) if skip else "all days"
         log.info(f"  {sym}  vol-mult {cfg.get('vol_mult')}×  "
                  f"breakout {cfg.get('breakout')*100:.3f}%  "
-                 f"arm {cfg.get('arm_distance')*100:.3f}%")
+                 f"arm {cfg.get('arm_distance')*100:.3f}%  "
+                 f"hours={hrs}  skip={days}")
 
     for sym in active:
         set_leverage(client, sym, debug)
@@ -524,6 +545,27 @@ def _process_symbol(client: BitunixClient, sym: str, s: dict, cfg: dict,
             if not z_ok:    reasons.append(f"z={z:+.3f}")
             if not vol_ok:  reasons.append(f"vol={vol_now:.0f}<{vol_avg*cfg['vol_mult']:.0f}")
             log.info(f"  {sym}: armed @ {level:.4f} — waiting [{', '.join(reasons)}]")
+        return
+
+    # Time-of-day and day-of-week filter (only blocks new entries, not open trades)
+    candle_dt   = datetime.fromtimestamp(c["time"] / 1000, tz=timezone.utc)
+    candle_hour = candle_dt.hour
+    candle_dow  = candle_dt.weekday()
+    windows = cfg.get("windows")
+    if windows:
+        in_window = False
+        for sh, eh in windows:
+            if sh <= eh:
+                if sh <= candle_hour < eh:
+                    in_window = True; break
+            else:  # wraps midnight
+                if candle_hour >= sh or candle_hour < eh:
+                    in_window = True; break
+        if not in_window:
+            log.info(f"  {sym}: outside trade window ({candle_dt.strftime('%a %H:%M')} UTC) — skip")
+            return
+    if candle_dow in cfg.get("skip_days", set()):
+        log.info(f"  {sym}: skip day ({candle_dt.strftime('%a')} UTC) — skip")
         return
 
     # WATCHING — compute levels and check for arming
