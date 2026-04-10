@@ -41,8 +41,20 @@ start_logging("bb_trader")
 # ── Per-symbol sweep-optimised config ─────────────────────────────────────────
 
 SYMBOL_CONFIGS = {
-    "BTCUSDT": {"period": 30, "mult": 1.5},
-    "ETHUSDT": {"period": 20, "mult": 1.5},
+    "BTCUSDT": {
+        "period":     30,
+        "mult":       1.5,
+        "start_hour": 11,   # sweep winner: 11:00–13:00 Mon-Fri
+        "end_hour":   13,
+        "skip_days":  {5, 6},  # Sat, Sun
+    },
+    "ETHUSDT": {
+        "period":     20,
+        "mult":       1.5,
+        "start_hour": 9,    # sweep winner: 09:00–11:00 and 14:00–17:00 Mon-Fri
+        "end_hour":   11,   # primary window; secondary 14-17 can be added later
+        "skip_days":  {5, 6},  # Sat, Sun
+    },
 }
 SYMBOLS = list(SYMBOL_CONFIGS.keys())
 
@@ -54,13 +66,6 @@ SQUEEZE_THRESH   = 1.0    # enter only when bw ≤ bw_rolling_avg × threshold
 SQUEEZE_LOOKBACK = 50     # 5m candles for rolling band-width average
 COOLDOWN_5M      = 5      # 5m candles to block same-direction re-entry after SL
 MAX_HOLD_MINS    = 33
-
-# Time-of-day and day-of-week entry filter (UTC)
-# Only enter new trades within this hour window; 0-23, None = no filter
-TRADE_START_HOUR = 13    # NYSE pre-market open (13:30 UTC)
-TRADE_END_HOUR   = 22    # NYSE close (21:00 UTC) + 1h buffer
-# Weekdays to skip new entries: 0=Mon … 6=Sun
-TRADE_SKIP_DAYS  = {5, 6}  # Saturday, Sunday
 
 FIVE_MIN_MS      = 5 * 60 * 1000
 MIN_HISTORY_5M   = max(50, SQUEEZE_LOOKBACK) + 10   # 5m candles before trading
@@ -435,16 +440,18 @@ def _process_symbol(client: BitunixClient, sym: str, s: dict,
         return
 
     # Time-of-day and day-of-week filter (only blocks new entries, not open trades)
-    candle_dt  = datetime.fromtimestamp(completed_5m["time"] / 1000, tz=timezone.utc)
+    candle_dt   = datetime.fromtimestamp(completed_5m["time"] / 1000, tz=timezone.utc)
     candle_hour = candle_dt.hour
     candle_dow  = candle_dt.weekday()
+    sh = cfg.get("start_hour")
+    eh = cfg.get("end_hour")
     trade_window_ok = True
-    if TRADE_START_HOUR is not None and TRADE_END_HOUR is not None:
-        if TRADE_START_HOUR <= TRADE_END_HOUR:
-            trade_window_ok = TRADE_START_HOUR <= candle_hour < TRADE_END_HOUR
+    if sh is not None and eh is not None:
+        if sh <= eh:
+            trade_window_ok = sh <= candle_hour < eh
         else:  # wraps midnight
-            trade_window_ok = candle_hour >= TRADE_START_HOUR or candle_hour < TRADE_END_HOUR
-    if candle_dow in TRADE_SKIP_DAYS:
+            trade_window_ok = candle_hour >= sh or candle_hour < eh
+    if candle_dow in cfg.get("skip_days", set()):
         trade_window_ok = False
     if not trade_window_ok:
         log.info(f"  {sym}: outside trade window ({candle_dt.strftime('%a %H:%M')} UTC) — skip")
@@ -643,18 +650,20 @@ def run(debug: bool, symbols: list[str] = None) -> None:
     log.info(f"  Cooldown  : {COOLDOWN_5M} 5m-candles after SL")
     log.info(f"  Hold      : ≤{MAX_HOLD_MINS}min  |  Leverage: {LEVERAGE}×")
     log.info(f"  Max trade : {MAX_TRADE_PCT:.0%}  |  Fees: {ROUND_TRIP_FEE*100:.3f}%")
-    _day_names = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
-    if TRADE_START_HOUR is not None and TRADE_END_HOUR is not None:
-        log.info(f"  Trade hrs : {TRADE_START_HOUR:02d}:00–{TRADE_END_HOUR:02d}:00 UTC")
-    if TRADE_SKIP_DAYS:
-        log.info(f"  Skip days : {', '.join(_day_names[d] for d in sorted(TRADE_SKIP_DAYS))}")
     if debug:
         log.info("  MODE      : DEBUG — no real orders")
     log.info("━" * 60)
 
+    _day_names = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
     for sym in active:
         cfg = SYMBOL_CONFIGS.get(sym, {})
-        log.info(f"  {sym}  period={cfg.get('period')}  mult={cfg.get('mult')}×")
+        sh  = cfg.get("start_hour")
+        eh  = cfg.get("end_hour")
+        hrs = f"{sh:02d}:00–{eh:02d}:00 UTC" if sh is not None and eh is not None else "all hours"
+        skip = cfg.get("skip_days", set())
+        days = ", ".join(_day_names[d] for d in sorted(skip)) if skip else "all days"
+        log.info(f"  {sym}  period={cfg.get('period')}  mult={cfg.get('mult')}×  "
+                 f"hours={hrs}  skip={days}")
 
     for sym in active:
         set_leverage(client, sym, debug)
