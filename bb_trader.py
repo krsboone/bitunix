@@ -42,18 +42,16 @@ start_logging("bb_trader")
 
 SYMBOL_CONFIGS = {
     "BTCUSDT": {
-        "period":     30,
-        "mult":       1.5,
-        "start_hour": 11,   # sweep winner: 11:00–13:00 Mon-Fri
-        "end_hour":   13,
-        "skip_days":  {5, 6},  # Sat, Sun
+        "period":    30,
+        "mult":      1.5,
+        "windows":   [(11, 13)],   # 11:00–13:00 UTC Mon-Fri
+        "skip_days": {5, 6},       # Sat, Sun
     },
     "ETHUSDT": {
-        "period":     20,
-        "mult":       1.5,
-        "start_hour": 9,    # sweep winner: 09:00–11:00 and 14:00–17:00 Mon-Fri
-        "end_hour":   11,   # primary window; secondary 14-17 can be added later
-        "skip_days":  {5, 6},  # Sat, Sun
+        "period":    20,
+        "mult":      1.5,
+        "windows":   [(9, 11), (14, 17)],  # 09:00–11:00 and 14:00–17:00 UTC Mon-Fri
+        "skip_days": {5, 6},               # Sat, Sun
     },
 }
 SYMBOLS = list(SYMBOL_CONFIGS.keys())
@@ -443,18 +441,21 @@ def _process_symbol(client: BitunixClient, sym: str, s: dict,
     candle_dt   = datetime.fromtimestamp(completed_5m["time"] / 1000, tz=timezone.utc)
     candle_hour = candle_dt.hour
     candle_dow  = candle_dt.weekday()
-    sh = cfg.get("start_hour")
-    eh = cfg.get("end_hour")
-    trade_window_ok = True
-    if sh is not None and eh is not None:
-        if sh <= eh:
-            trade_window_ok = sh <= candle_hour < eh
-        else:  # wraps midnight
-            trade_window_ok = candle_hour >= sh or candle_hour < eh
+    windows = cfg.get("windows")
+    if windows:
+        in_window = False
+        for sh, eh in windows:
+            if sh <= eh:
+                if sh <= candle_hour < eh:
+                    in_window = True; break
+            else:  # wraps midnight
+                if candle_hour >= sh or candle_hour < eh:
+                    in_window = True; break
+        if not in_window:
+            log.info(f"  {sym}: outside trade window ({candle_dt.strftime('%a %H:%M')} UTC) — skip")
+            return
     if candle_dow in cfg.get("skip_days", set()):
-        trade_window_ok = False
-    if not trade_window_ok:
-        log.info(f"  {sym}: outside trade window ({candle_dt.strftime('%a %H:%M')} UTC) — skip")
+        log.info(f"  {sym}: skip day ({candle_dt.strftime('%a')} UTC) — skip")
         return
 
     sma, upper, lower, hw = bollinger(s["buf_5m"], cfg["period"], cfg["mult"])
@@ -656,10 +657,12 @@ def run(debug: bool, symbols: list[str] = None) -> None:
 
     _day_names = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
     for sym in active:
-        cfg = SYMBOL_CONFIGS.get(sym, {})
-        sh  = cfg.get("start_hour")
-        eh  = cfg.get("end_hour")
-        hrs = f"{sh:02d}:00–{eh:02d}:00 UTC" if sh is not None and eh is not None else "all hours"
+        cfg     = SYMBOL_CONFIGS.get(sym, {})
+        windows = cfg.get("windows")
+        if windows:
+            hrs = "  ".join(f"{sh:02d}:00–{eh:02d}:00" for sh, eh in windows) + " UTC"
+        else:
+            hrs = "all hours"
         skip = cfg.get("skip_days", set())
         days = ", ".join(_day_names[d] for d in sorted(skip)) if skip else "all days"
         log.info(f"  {sym}  period={cfg.get('period')}  mult={cfg.get('mult')}×  "
