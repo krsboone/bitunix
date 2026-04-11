@@ -47,7 +47,8 @@ start_logging("follow_trader")
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-SYMBOLS        = ["BTCUSDT", "ETHUSDT", "RIVERUSDT"]
+#SYMBOLS        = ["BTCUSDT", "ETHUSDT", "RIVERUSDT"]
+SYMBOLS        = ["BTCUSDT", "ETHUSDT"]
 LEVERAGE       = 2
 MARGIN_COIN    = "USDT"
 

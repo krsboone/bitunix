@@ -252,8 +252,10 @@ VOL_SPIKE_DEFAULTS = {
     "--spike-mult":   2.0,
     "--vol-lookback": 20,
     "--atr-period":   14,
-    "--tp-mult":      1.5,
-    "--sl-mult":      1.0,
+    #"--tp-mult":      1.5,
+    "--tp-mult":      1.0,
+    #"--sl-mult":      1.0,
+    "--sl-mult":      2.0,
     "--hold":         33,
     "--cooldown":     10,
 }

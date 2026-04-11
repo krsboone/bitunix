@@ -36,7 +36,7 @@ start_logging("trader")
 # ── Configuration ─────────────────────────────────────────────────────────────
 
 #SYMBOLS        = ["BTCUSDT", "ETHUSDT", "RIVERUSDT"]
-SYMBOLS        = ["BTCUSDT", "ETHUSDT"]
+SYMBOLS        = ["RIVERUSDT"]
 LEVERAGE       = 2
 MARGIN_COIN    = "USDT"
 INTERVAL       = "1m"          # candle interval

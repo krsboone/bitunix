@@ -26,7 +26,8 @@ from config import API_KEY, SECRET_KEY
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-SYMBOLS  = ["BTCUSDT", "ETHUSDT", "RIVERUSDT"]
+#SYMBOLS  = ["BTCUSDT", "ETHUSDT", "RIVERUSDT"]
+SYMBOLS  = ["BTCUSDT", "ETHUSDT"]
 INTERVAL = "1m"
 DATA_DIR = "data"
 BATCH    = 1000   # candles per API request

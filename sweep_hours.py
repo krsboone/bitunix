@@ -32,9 +32,13 @@ SIM_PRESETS = {
     },
     "vol_spike": {
         "script":    "vol_spike_sim.py",
-        "args":      ["--flip", "--tp-mult", "1.5", "--sl-mult", "1.0"],
-        "tp_mult":   1.5,
-        "sl_mult":   1.0,
+        #"args":      ["--flip", "--tp-mult", "1.5", "--sl-mult", "1.0"],
+        #"tp_mult":   1.5,
+        #"sl_mult":   1.0,
+        "args":      ["--flip", "--tp-mult", "2.5", "--sl-mult", "0.2"],
+        "tp_mult":   2.5,
+        "sl_mult":   0.2,
+
     },
     "exhaustion": {
         "script":    "exhaustion_sim.py",
@@ -138,9 +142,39 @@ def main() -> None:
                         help="Pass --start to bb_sim.py")
     parser.add_argument("--end", metavar="YYYY-MM-DD",
                         help="Pass --end to bb_sim.py")
+    parser.add_argument("--tp-mult", dest="tp_mult", type=float,
+                        help="Override preset tp_mult (and pass --tp-mult to sim)")
+    parser.add_argument("--sl-mult", dest="sl_mult", type=float,
+                        help="Override preset sl_mult (and pass --sl-mult to sim)")
+    parser.add_argument("--flip", action="store_true",
+                        help="Pass --flip to the sim (overrides preset)")
     args = parser.parse_args()
 
-    preset = SIM_PRESETS[args.sim]
+    preset = dict(SIM_PRESETS[args.sim])  # shallow copy so we don't mutate the original
+    preset_args = list(preset["args"])
+
+    if args.tp_mult is not None:
+        preset["tp_mult"] = args.tp_mult
+        # replace or append --tp-mult in preset args
+        if "--tp-mult" in preset_args:
+            idx = preset_args.index("--tp-mult")
+            preset_args[idx + 1] = str(args.tp_mult)
+        else:
+            preset_args += ["--tp-mult", str(args.tp_mult)]
+
+    if args.sl_mult is not None:
+        preset["sl_mult"] = args.sl_mult
+        if "--sl-mult" in preset_args:
+            idx = preset_args.index("--sl-mult")
+            preset_args[idx + 1] = str(args.sl_mult)
+        else:
+            preset_args += ["--sl-mult", str(args.sl_mult)]
+
+    if args.flip and "--flip" not in preset_args:
+        preset_args.append("--flip")
+
+    preset["args"] = preset_args
+
     extra = []
     if args.start: extra += ["--start", args.start]
     if args.end:   extra += ["--end",   args.end]

@@ -1,24 +1,23 @@
 """
-vol_spike_trader.py — Bitunix volume spike reversion perpetual futures trader
+vol_spike_trader.py — Bitunix volume spike momentum perpetual futures trader
 
-Strategy: Volume spike reversion (--flip mode from vol_spike_sim.py)
+Strategy: Volume spike momentum (non-flip mode from vol_spike_sim.py)
   - Monitor live 1m candles for volume spikes (≥ SPIKE_MULT × rolling average)
-  - When a spike candle has directional conviction (clear body), enter OPPOSITE:
-      Bullish spike (close > open) → SHORT (reversion expected)
-      Bearish spike (close < open) → LONG  (reversion expected)
+  - When a spike candle has directional conviction (clear body), enter SAME direction:
+      Bullish spike (close > open) → LONG  (momentum continuation)
+      Bearish spike (close < open) → SHORT (momentum continuation)
   - TP/SL sized in ATR units (Average True Range over ATR_PERIOD candles):
       TP = entry ± ATR × TP_MULT
       SL = entry ∓ ATR × SL_MULT
   - Directional cooldown: block same-direction re-entry for N candles after SL
   - Time exit: close if held > MAX_HOLD_MINS
+  - Per-symbol time windows: only trade during sweep-validated UTC hours
 
-Data-derived signal: sweep showed 53% TP at equal TP/SL sizing (1:1 ATR),
-consistent across BTC and ETH. Positive EV signal from vol_spike_sim.py
-analysis on 90 days of 1m OHLCV data.
-
-Sweep-validated parameters:
+Sweep-validated parameters (180d + 90d cross-check):
   Shared: spike_mult=2.0  vol_lookback=20  atr_period=14
-          tp_mult=1.0  sl_mult=1.0  cooldown=10
+          tp_mult=2.5  sl_mult=0.2  cooldown=10
+  BTCUSDT: 17:00–18:00 UTC all days
+  ETHUSDT: 22:00–23:00 UTC all days
 
 Usage:
     python3 vol_spike_trader.py          # live trading
@@ -49,12 +48,25 @@ SYMBOLS      = ["BTCUSDT", "ETHUSDT"]
 SPIKE_MULT   = 2.0     # volume must be ≥ spike_mult × rolling avg to signal
 VOL_LOOKBACK = 20      # candles for rolling volume average
 ATR_PERIOD   = 14      # candles for ATR calculation
-TP_MULT      = 1.0     # TP = entry ± atr × tp_mult
-SL_MULT      = 1.0     # SL = entry ∓ atr × sl_mult
+TP_MULT      = 2.5     # TP = entry ± atr × tp_mult
+SL_MULT      = 0.2     # SL = entry ∓ atr × sl_mult
 MAX_HOLD_MINS = 33
 COOLDOWN     = 10      # candles to block same-direction re-entry after SL
 
 MIN_HISTORY  = max(VOL_LOOKBACK, ATR_PERIOD) + 5
+
+# Per-symbol time windows (UTC). windows = list of (start_hour, end_hour) tuples.
+# skip_days: 0=Mon … 6=Sun
+SYMBOL_CONFIGS = {
+    "BTCUSDT": {
+        "windows":   [(17, 18)],   # 17:00–18:00 UTC all days
+        "skip_days": set(),
+    },
+    "ETHUSDT": {
+        "windows":   [(22, 23)],   # 22:00–23:00 UTC all days
+        "skip_days": set(),
+    },
+}
 
 # ── Trading parameters ─────────────────────────────────────────────────────────
 
@@ -308,9 +320,32 @@ def _process_symbol(client: BitunixClient, sym: str, s: dict,
         if s["short_blocked"] > 0: s["short_blocked"] -= 1
 
     # ── 5. WATCHING: check signal on each new candle ───────────────────────────
+    cfg = SYMBOL_CONFIGS.get(sym, {})
     for c1 in new:
         if s["state"] != "WATCHING":
             break
+
+        # Time window filter
+        candle_dt  = datetime.fromtimestamp(c1["time"] / 1000, tz=timezone.utc)
+        candle_hour = candle_dt.hour
+        candle_dow  = candle_dt.weekday()
+        windows = cfg.get("windows")
+        if windows:
+            in_window = False
+            for sh, eh in windows:
+                if sh <= eh:
+                    if sh <= candle_hour < eh:
+                        in_window = True; break
+                else:
+                    if candle_hour >= sh or candle_hour < eh:
+                        in_window = True; break
+            if not in_window:
+                log.info(f"  {sym}: outside trade window "
+                         f"({candle_dt.strftime('%a %H:%M')} UTC) — skip")
+                continue
+        if candle_dow in cfg.get("skip_days", set()):
+            log.info(f"  {sym}: skip day ({candle_dt.strftime('%a')} UTC) — skip")
+            continue
 
         # Rolling vol average (exclude current candle)
         prior_vols = [v for v in list(s["vol_window"])[:-1] if v > 0]
@@ -333,21 +368,21 @@ def _process_symbol(client: BitunixClient, sym: str, s: dict,
         if atr == 0:
             continue
 
-        # Enter OPPOSITE to spike direction (reversion)
+        # Enter SAME direction as spike (momentum continuation)
         price = c1["close"]
         if body > 0:
-            # Bullish spike → SHORT
-            if s["short_blocked"] > 0:
-                log.info(f"  {sym}: spike signal blocked [SHORT cooldown]")
-                continue
-            s["pending_side"] = "SHORT"
-            s["pending_hw"]   = atr
-        else:
-            # Bearish spike → LONG
+            # Bullish spike → LONG
             if s["long_blocked"] > 0:
                 log.info(f"  {sym}: spike signal blocked [LONG cooldown]")
                 continue
             s["pending_side"] = "LONG"
+            s["pending_hw"]   = atr
+        else:
+            # Bearish spike → SHORT
+            if s["short_blocked"] > 0:
+                log.info(f"  {sym}: spike signal blocked [SHORT cooldown]")
+                continue
+            s["pending_side"] = "SHORT"
             s["pending_hw"]   = atr
 
         vol_ratio = vol_now / vol_avg
@@ -494,13 +529,20 @@ def run(debug: bool, symbols: list[str] = None) -> None:
     active = symbols or SYMBOLS
 
     log.info("━" * 60)
-    log.info("  Vol Spike Reversion Trader")
+    log.info("  Vol Spike Momentum Trader")
     log.info(f"  Symbols    : {', '.join(active)}")
     log.info(f"  Spike mult : {SPIKE_MULT}×  Vol lookback: {VOL_LOOKBACK}")
     log.info(f"  ATR period : {ATR_PERIOD}  TP/SL: {TP_MULT}/{SL_MULT}×ATR")
     log.info(f"  Cooldown   : {COOLDOWN} candles after SL")
     log.info(f"  Hold       : ≤{MAX_HOLD_MINS}min  |  Leverage: {LEVERAGE}×")
     log.info(f"  Max trade  : {MAX_TRADE_PCT:.0%}  |  Fees: {ROUND_TRIP_FEE*100:.3f}%")
+    for sym in active:
+        cfg = SYMBOL_CONFIGS.get(sym, {})
+        windows = cfg.get("windows", [])
+        skip    = cfg.get("skip_days", set())
+        day_str = "all days" if not skip else f"skip {', '.join(str(d) for d in skip)}"
+        win_str = ", ".join(f"{sh:02d}:00–{eh:02d}:00" for sh, eh in windows) if windows else "all hours"
+        log.info(f"  {sym:<10}: {win_str} UTC  ({day_str})")
     if debug:
         log.info("  MODE       : DEBUG — no real orders")
     log.info("━" * 60)
