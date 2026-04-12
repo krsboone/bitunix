@@ -148,8 +148,9 @@ def run_symbol(symbol: str, candles: list[dict],
     trade_open_ts  = None
 
     # Incremental rolling windows — avoids O(n²) candles[:i] slices
-    vol_window = []   # rolling volume window (length = vol_lookback)
-    atr_window = []   # rolling candle window for ATR (length = atr_period + 1)
+    vol_window      = []   # rolling volume window (length = vol_lookback)
+    atr_window      = []   # rolling candle window for ATR (length = atr_period + 1)
+    atr_filter_window = [] # longer candle window for ATR filter average
 
     for i, c in enumerate(candles):
         if not quiet and i % step == 0:
@@ -167,6 +168,9 @@ def run_symbol(symbol: str, candles: list[dict],
         atr_window.append(c)
         if len(atr_window) > args.atr_period + 2:
             atr_window.pop(0)
+        atr_filter_window.append(c)
+        if len(atr_filter_window) > args.atr_period + args.atr_lookback + 2:
+            atr_filter_window.pop(0)
 
         if i < min_hist:
             continue
@@ -261,6 +265,23 @@ def run_symbol(symbol: str, candles: list[dict],
         if atr == 0:
             continue
 
+        # Condition 4 (optional): ATR filter — only trade when volatility is elevated
+        if args.atr_filter is not None:
+            needed = args.atr_period + args.atr_lookback + 1
+            if len(atr_filter_window) >= needed:
+                # Compute ATR at each of the last atr_lookback positions
+                atr_series = []
+                for k in range(1, args.atr_lookback + 1):
+                    end = len(atr_filter_window) - k
+                    sub = atr_filter_window[max(0, end - args.atr_period - 1): end]
+                    a = compute_atr(sub, args.atr_period)
+                    if a > 0:
+                        atr_series.append(a)
+                if atr_series:
+                    atr_avg = sum(atr_series) / len(atr_series)
+                    if atr < atr_avg * args.atr_filter:
+                        continue
+
         # Signal: enter OPPOSITE to streak direction
         tp_dist = atr * args.tp_mult
         sl_dist = atr * args.sl_mult
@@ -349,6 +370,12 @@ def main() -> None:
                         help=f"Max hold minutes (default: {MAX_HOLD_MINS})")
     parser.add_argument("--cooldown", type=int, default=COOLDOWN,
                         help=f"Candles to block re-entry after SL (default: {COOLDOWN})")
+    parser.add_argument("--atr-filter", dest="atr_filter", type=float, default=None,
+                        metavar="THRESH",
+                        help="Only enter when current ATR ≥ atr_avg × THRESH (e.g. 1.0 = above average, 1.2 = 20%% above)")
+    parser.add_argument("--atr-lookback", dest="atr_lookback", type=int, default=50,
+                        metavar="N",
+                        help="Candles of ATR history to average for atr-filter (default: 50)")
     parser.add_argument("--start-hour", dest="start_hour", type=int, default=None,
                         metavar="H", help="Only enter trades at/after this UTC hour (0-23)")
     parser.add_argument("--end-hour", dest="end_hour", type=int, default=None,
@@ -387,6 +414,9 @@ def main() -> None:
         print(f"  ATR period : {args.atr_period}  TP mult: {args.tp_mult}×  "
               f"SL mult: {args.sl_mult}×")
         print(f"  Hold       : ≤{args.hold}min  Cooldown: {args.cooldown} candles")
+        if args.atr_filter is not None:
+            print(f"  ATR filter : current ATR ≥ {args.atr_filter}× avg  "
+                  f"(lookback: {args.atr_lookback} candles)")
         if args.start_hour is not None or args.end_hour is not None:
             sh = f"{args.start_hour:02d}:00" if args.start_hour is not None else "00:00"
             eh = f"{args.end_hour:02d}:00"   if args.end_hour   is not None else "24:00"

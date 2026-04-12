@@ -42,9 +42,9 @@ SIM_PRESETS = {
     },
     "exhaustion": {
         "script":    "exhaustion_sim.py",
-        "args":      ["--tp-mult", "1.0", "--sl-mult", "1.0"],
-        "tp_mult":   1.0,
-        "sl_mult":   1.0,
+        "args":      ["--tp-mult", "4.5", "--sl-mult", "0.2"],
+        "tp_mult":   4.5,
+        "sl_mult":   0.2,
     },
     "sr": {
         "script":    "sr_sim.py",
@@ -148,6 +148,12 @@ def main() -> None:
                         help="Override preset sl_mult (and pass --sl-mult to sim)")
     parser.add_argument("--flip", action="store_true",
                         help="Pass --flip to the sim (overrides preset)")
+    parser.add_argument("--atr-filter", dest="atr_filter", type=float, default=None,
+                        metavar="THRESH",
+                        help="Pass --atr-filter THRESH to sim (e.g. 1.5)")
+    parser.add_argument("--atr-lookback", dest="atr_lookback", type=int, default=None,
+                        metavar="N",
+                        help="Pass --atr-lookback N to sim (default: sim's own default)")
     args = parser.parse_args()
 
     preset = dict(SIM_PRESETS[args.sim])  # shallow copy so we don't mutate the original
@@ -172,6 +178,11 @@ def main() -> None:
 
     if args.flip and "--flip" not in preset_args:
         preset_args.append("--flip")
+
+    if args.atr_filter is not None:
+        preset_args += ["--atr-filter", str(args.atr_filter)]
+    if args.atr_lookback is not None:
+        preset_args += ["--atr-lookback", str(args.atr_lookback)]
 
     preset["args"] = preset_args
 

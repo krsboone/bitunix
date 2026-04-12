@@ -18,9 +18,11 @@ Data-derived signal: sweep showed 54.7% TP at equal TP/SL sizing (1:1 ATR)
 at 5,620 trades. Positive EV signal from exhaustion_sim.py analysis on 90
 days of 1m OHLCV data.
 
-Sweep-validated parameters:
+Sweep-validated parameters (180d + 161d + 90d cross-check):
   Shared: streak=4  vol_mult=1.5  vol_lookback=20  atr_period=14
-          tp_mult=1.0  sl_mult=1.0  cooldown=10
+          tp_mult=4.5  sl_mult=0.2  cooldown=10
+  ETHUSDT: 22:00–23:00 UTC all days
+  BTCUSDT: windows=[] — commented out pending further sweep analysis
 
 Usage:
     python3 exhaustion_trader.py          # live trading
@@ -48,16 +50,34 @@ start_logging("exhaustion_trader")
 
 SYMBOLS      = ["BTCUSDT", "ETHUSDT"]
 
-STREAK_LEN   = 4       # consecutive same-direction candles required
-VOL_MULT     = 1.5     # final candle volume must be ≥ vol_mult × rolling avg
-VOL_LOOKBACK = 20      # candles for rolling volume average
-ATR_PERIOD   = 14      # candles for ATR calculation
-TP_MULT      = 1.0     # TP = entry ± atr × tp_mult
-SL_MULT      = 1.0     # SL = entry ∓ atr × sl_mult
+STREAK_LEN    = 4       # consecutive same-direction candles required
+VOL_MULT      = 1.5    # final candle volume must be ≥ vol_mult × rolling avg
+VOL_LOOKBACK  = 20     # candles for rolling volume average
+ATR_PERIOD    = 14     # candles for ATR calculation
+TP_MULT       = 4.5    # TP = entry ± atr × tp_mult
+SL_MULT       = 0.2    # SL = entry ∓ atr × sl_mult
 MAX_HOLD_MINS = 33
-COOLDOWN     = 10      # candles to block same-direction re-entry after SL
+COOLDOWN      = 10     # candles to block same-direction re-entry after SL
+
+# ATR filter: only enter when current ATR ≥ ATR_FILTER_THRESH × rolling ATR average
+# Set to None to disable
+ATR_FILTER_THRESH   = 1.5
+ATR_FILTER_LOOKBACK = 50   # candles of ATR history to average
 
 MIN_HISTORY  = max(VOL_LOOKBACK, ATR_PERIOD, STREAK_LEN) + 5
+
+# Per-symbol time windows (UTC). windows = list of (start_hour, end_hour) tuples.
+# skip_days: 0=Mon … 6=Sun. Empty windows list = trade all hours.
+SYMBOL_CONFIGS = {
+    "BTCUSDT": {
+        "windows":   [],        # no validated window yet — trades all hours until confirmed
+        "skip_days": set(),
+    },
+    "ETHUSDT": {
+        "windows":   [(22, 23), (23, 0)],  # 22:00–00:00 UTC all days
+        "skip_days": set(),
+    },
+}
 
 # ── Trading parameters ─────────────────────────────────────────────────────────
 
@@ -321,6 +341,7 @@ def _process_symbol(client: BitunixClient, sym: str, s: dict,
     for c1 in new:
         s["vol_window"].append(c1["volume"])
         s["atr_window"].append(c1)
+        s["atr_filter_window"].append(c1)
         s["streak_window"].append(c1)
         s["last_ts"] = c1["time"]
 
@@ -347,15 +368,57 @@ def _process_symbol(client: BitunixClient, sym: str, s: dict,
         if s["short_blocked"] > 0: s["short_blocked"] -= 1
 
     # ── 5. WATCHING: check signal on each new candle ───────────────────────────
+    cfg = SYMBOL_CONFIGS.get(sym, {})
     for c1 in new:
         if s["state"] != "WATCHING":
             break
+
+        # Time window filter
+        candle_dt   = datetime.fromtimestamp(c1["time"] / 1000, tz=timezone.utc)
+        candle_hour = candle_dt.hour
+        candle_dow  = candle_dt.weekday()
+        windows = cfg.get("windows")
+        if windows:
+            in_window = False
+            for sh, eh in windows:
+                if sh <= eh:
+                    if sh <= candle_hour < eh:
+                        in_window = True; break
+                else:
+                    if candle_hour >= sh or candle_hour < eh:
+                        in_window = True; break
+            if not in_window:
+                log.info(f"  {sym}: outside trade window "
+                         f"({candle_dt.strftime('%a %H:%M')} UTC) — skip")
+                continue
+        if candle_dow in cfg.get("skip_days", set()):
+            log.info(f"  {sym}: skip day ({candle_dt.strftime('%a')} UTC) — skip")
+            continue
 
         # ATR sizing
         atr_list = list(s["atr_window"])[:-1]
         atr = compute_atr(atr_list)
         if atr == 0:
             continue
+
+        # ATR filter: skip if volatility is below threshold
+        if ATR_FILTER_THRESH is not None:
+            fw = list(s["atr_filter_window"])
+            needed = ATR_PERIOD + ATR_FILTER_LOOKBACK + 1
+            if len(fw) >= needed:
+                atr_series = []
+                for k in range(1, ATR_FILTER_LOOKBACK + 1):
+                    end = len(fw) - k
+                    sub = fw[max(0, end - ATR_PERIOD - 1): end]
+                    a = compute_atr(sub)
+                    if a > 0:
+                        atr_series.append(a)
+                if atr_series:
+                    atr_avg = sum(atr_series) / len(atr_series)
+                    if atr < atr_avg * ATR_FILTER_THRESH:
+                        log.info(f"  {sym}: ATR filter — atr={atr:.4f} < "
+                                 f"{ATR_FILTER_THRESH}× avg={atr_avg:.4f} — skip")
+                        continue
 
         streak_dir = check_exhaustion_signal(list(s["streak_window"]), s["vol_window"])
         if streak_dir is None:
@@ -527,9 +590,19 @@ def run(debug: bool, symbols: list[str] = None) -> None:
     log.info(f"  Symbols    : {', '.join(active)}")
     log.info(f"  Streak     : {STREAK_LEN} candles  Vol mult: {VOL_MULT}×  Lookback: {VOL_LOOKBACK}")
     log.info(f"  ATR period : {ATR_PERIOD}  TP/SL: {TP_MULT}/{SL_MULT}×ATR")
+    if ATR_FILTER_THRESH is not None:
+        log.info(f"  ATR filter : ≥ {ATR_FILTER_THRESH}× rolling avg  "
+                 f"(lookback: {ATR_FILTER_LOOKBACK} candles)")
     log.info(f"  Cooldown   : {COOLDOWN} candles after SL")
     log.info(f"  Hold       : ≤{MAX_HOLD_MINS}min  |  Leverage: {LEVERAGE}×")
     log.info(f"  Max trade  : {MAX_TRADE_PCT:.0%}  |  Fees: {ROUND_TRIP_FEE*100:.3f}%")
+    for sym in active:
+        cfg = SYMBOL_CONFIGS.get(sym, {})
+        windows = cfg.get("windows", [])
+        skip    = cfg.get("skip_days", set())
+        day_str = "all days" if not skip else f"skip {', '.join(str(d) for d in skip)}"
+        win_str = ", ".join(f"{sh:02d}:00–{eh:02d}:00" for sh, eh in windows) if windows else "all hours"
+        log.info(f"  {sym:<10}: {win_str} UTC  ({day_str})")
     if debug:
         log.info("  MODE       : DEBUG — no real orders")
     log.info("━" * 60)
@@ -548,18 +621,21 @@ def run(debug: bool, symbols: list[str] = None) -> None:
         candles_1m = fetch_candles_paged(client, sym, pages=INIT_PAGES)
 
         # Pre-fill rolling windows from history
-        vol_window    = deque(maxlen=VOL_LOOKBACK)
-        atr_window    = deque(maxlen=ATR_PERIOD + 2)
-        streak_window = deque(maxlen=STREAK_LEN)
+        vol_window        = deque(maxlen=VOL_LOOKBACK)
+        atr_window        = deque(maxlen=ATR_PERIOD + 2)
+        atr_filter_window = deque(maxlen=ATR_PERIOD + ATR_FILTER_LOOKBACK + 2)
+        streak_window     = deque(maxlen=STREAK_LEN)
         for c in candles_1m:
             vol_window.append(c["volume"])
             atr_window.append(c)
+            atr_filter_window.append(c)
             streak_window.append(c)
 
         sym_state[sym] = {
-            "vol_window":    vol_window,
-            "atr_window":    atr_window,
-            "streak_window": streak_window,
+            "vol_window":        vol_window,
+            "atr_window":        atr_window,
+            "atr_filter_window": atr_filter_window,
+            "streak_window":     streak_window,
             "candles_seen":  len(candles_1m),
             "last_ts":       candles_1m[-1]["time"] if candles_1m else 0,
             # State machine
