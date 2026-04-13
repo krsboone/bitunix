@@ -439,6 +439,7 @@ def run(debug: bool, symbols: list[str] = None) -> None:
                 "sl_price":    None,
                 "opened_at":   now_utc(),
                 "debug":       False,
+                "arm_id":      "",
             }
             log.info(f"  Hydrated {sym} [{side}] @ "
                      f"{sym_state[sym]['position']['entry_price']:.4f}")
@@ -562,49 +563,72 @@ def _process_symbol(client: BitunixClient, sym: str, s: dict, cfg: dict,
             log.info(f"  {sym}: armed @ {level:.4f} — waiting [{', '.join(reasons)}]")
         return
 
+    # WATCHING — compute levels and check for arming (before window check for shadow detection)
+    levels = compute_levels(s, buf)
+    levels = [lvl for lvl in levels if lvl not in s["broken_levels"]]
+
+    near_level   = None
+    near_dir     = None
+    if levels:
+        nearest  = min(levels, key=lambda lvl: abs(price - lvl))
+        dist_pct = abs(price - nearest) / nearest
+        log.info(f"  {sym}: nearest level {nearest:.4f}  dist {dist_pct*100:.3f}%")
+        if dist_pct <= cfg["arm_distance"]:
+            near_level = nearest
+            near_dir   = "UP" if price < nearest else "DOWN"
+    else:
+        log.info(f"  {sym}: no levels available")
+
     # Time-of-day and day-of-week filter (only blocks new entries, not open trades)
     candle_dt   = datetime.fromtimestamp(c["time"] / 1000, tz=timezone.utc)
     candle_hour = candle_dt.hour
     candle_dow  = candle_dt.weekday()
-    windows = cfg.get("windows")
+    windows     = cfg.get("windows")
+    in_window   = True
     if windows:
         in_window = False
         for sh, eh in windows:
             if sh <= eh:
                 if sh <= candle_hour < eh:
                     in_window = True; break
-            else:  # wraps midnight
+            else:
                 if candle_hour >= sh or candle_hour < eh:
                     in_window = True; break
+    skip_day = candle_dow in cfg.get("skip_days", set())
+
+    if not in_window or skip_day:
+        # Log shadow event if a level approach would have triggered ARMED outside the window
+        if near_level is not None:
+            sigma, _, _ = signals(buf)
+            side_est    = "LONG" if near_dir == "UP" else "SHORT"
+            wtp = wsl = None
+            if sigma > 0:
+                sigma_hold = sigma * math.sqrt(HOLD_INTERVALS)
+                move = price * sigma_hold
+                wtp = (price + move * TP_MULT) if side_est == "LONG" else (price - move * TP_MULT)
+                wsl = (price - move * SL_MULT) if side_est == "LONG" else (price + move * SL_MULT)
+            arm_log.log_arm_event(
+                arm_log.new_arm_id(), STRATEGY, sym,
+                now_utc().strftime("%Y-%m-%d %H:%M:%S"), price, side_est,
+                "PENDING", shadow=True, atr=sigma if sigma > 0 else None,
+                would_be_tp=wtp, would_be_sl=wsl,
+            )
+            log.info(f"  {sym}: shadow ARMED @ {near_level:.4f} dir={near_dir} "
+                     f"({candle_dt.strftime('%a %H:%M')} UTC outside window)")
         if not in_window:
             log.info(f"  {sym}: outside trade window ({candle_dt.strftime('%a %H:%M')} UTC) — skip")
-            return
-    if candle_dow in cfg.get("skip_days", set()):
-        log.info(f"  {sym}: skip day ({candle_dt.strftime('%a')} UTC) — skip")
+        else:
+            log.info(f"  {sym}: skip day ({candle_dt.strftime('%a')} UTC) — skip")
         return
 
-    # WATCHING — compute levels and check for arming
-    levels = compute_levels(s, buf)
-    levels = [lvl for lvl in levels if lvl not in s["broken_levels"]]
-
-    if not levels:
-        log.info(f"  {sym}: no levels available")
-        return
-
-    nearest  = min(levels, key=lambda lvl: abs(price - lvl))
-    dist_pct = abs(price - nearest) / nearest
-
-    log.info(f"  {sym}: nearest level {nearest:.4f}  dist {dist_pct*100:.3f}%")
-
-    if dist_pct <= cfg["arm_distance"]:
-        direction = "UP" if price < nearest else "DOWN"
+    if near_level is not None:
         s["state"]       = "ARMED"
-        s["armed_level"] = nearest
-        s["armed_dir"]   = direction
+        s["armed_level"] = near_level
+        s["armed_dir"]   = near_dir
         s["arm_id"]      = arm_log.new_arm_id()
         s["arm_time"]    = now_utc().strftime("%Y-%m-%d %H:%M:%S")
         s["arm_price"]   = price
-        log.info(f"  {sym}: ARMED  level={nearest:.4f}  dir={direction}")
+        log.info(f"  {sym}: ARMED  level={near_level:.4f}  dir={near_dir}")
 
 
 def _enter_trade(client: BitunixClient, sym: str, s: dict, cfg: dict,
@@ -648,7 +672,7 @@ def _enter_trade(client: BitunixClient, sym: str, s: dict, cfg: dict,
         return
 
     arm_log.log_arm_event(s["arm_id"], STRATEGY, sym, s["arm_time"], s["arm_price"],
-                          side, "FIRED", disarm_price=entry)
+                          side, "FIRED", disarm_price=entry, atr=sigma)
     log_trade({
         "symbol":       sym,
         "side":         side,
@@ -675,6 +699,7 @@ def _enter_trade(client: BitunixClient, sym: str, s: dict, cfg: dict,
         "qty":         qty,
         "opened_at":   now_utc(),
         "debug":       debug,
+        "arm_id":      s["arm_id"],
     }
 
 
@@ -699,14 +724,29 @@ def _monitor_trade(client: BitunixClient, sym: str, s: dict,
 
         if tp_hit:
             log.info(f"  {sym} [DEBUG]: TP hit @ {tp:.4f}")
+            arm_log.log_close_event(
+                pos.get("arm_id", ""), STRATEGY, sym, side,
+                "TP", tp, held_mins,
+                arm_log.calc_pnl(side, pos["entry_price"], tp, pos["qty"], ROUND_TRIP_FEE),
+            )
             s["state"] = "WATCHING"
             s["position"] = None
         elif sl_hit:
             log.info(f"  {sym} [DEBUG]: SL hit @ {sl:.4f}")
+            arm_log.log_close_event(
+                pos.get("arm_id", ""), STRATEGY, sym, side,
+                "SL", sl, held_mins,
+                arm_log.calc_pnl(side, pos["entry_price"], sl, pos["qty"], ROUND_TRIP_FEE),
+            )
             s["state"] = "WATCHING"
             s["position"] = None
         elif held_mins >= MAX_HOLD_MINS:
             log.info(f"  {sym} [DEBUG]: time exit @ {held_mins:.1f}min")
+            arm_log.log_close_event(
+                pos.get("arm_id", ""), STRATEGY, sym, side,
+                "TIME", price, held_mins,
+                arm_log.calc_pnl(side, pos["entry_price"], price, pos["qty"], ROUND_TRIP_FEE),
+            )
             s["state"] = "WATCHING"
             s["position"] = None
         return
@@ -716,7 +756,22 @@ def _monitor_trade(client: BitunixClient, sym: str, s: dict,
             if p.get("positionId") == pos["position_id"]]
 
     if not live:
-        log.info(f"  {sym}: position closed by exchange (TP/SL hit)")
+        cur_price = c["close"]
+        tp_px, sl_px = pos.get("tp_price"), pos.get("sl_price")
+        if tp_px is not None and sl_px is not None:
+            if side == "LONG":
+                outcome_str = "TP" if cur_price >= tp_px else ("SL" if cur_price <= sl_px else "EXCHANGE_CLOSED")
+            else:
+                outcome_str = "TP" if cur_price <= tp_px else ("SL" if cur_price >= sl_px else "EXCHANGE_CLOSED")
+            exit_px = tp_px if outcome_str == "TP" else (sl_px if outcome_str == "SL" else cur_price)
+        else:
+            outcome_str, exit_px = "EXCHANGE_CLOSED", cur_price
+        log.info(f"  {sym}: position closed by exchange ({outcome_str})")
+        arm_log.log_close_event(
+            pos.get("arm_id", ""), STRATEGY, sym, side,
+            outcome_str, exit_px, held_mins,
+            arm_log.calc_pnl(side, pos["entry_price"], exit_px, pos["qty"], ROUND_TRIP_FEE),
+        )
         s["state"]    = "WATCHING"
         s["position"] = None
         return
@@ -729,6 +784,11 @@ def _monitor_trade(client: BitunixClient, sym: str, s: dict,
     if held_mins >= MAX_HOLD_MINS:
         log.info(f"  {sym}: time exit after {held_mins:.1f}min")
         if close_position(client, pos["position_id"], sym, debug):
+            arm_log.log_close_event(
+                pos.get("arm_id", ""), STRATEGY, sym, side,
+                "TIME", c["close"], held_mins,
+                arm_log.calc_pnl(side, pos["entry_price"], c["close"], pos["qty"], ROUND_TRIP_FEE),
+            )
             s["state"]    = "WATCHING"
             s["position"] = None
 

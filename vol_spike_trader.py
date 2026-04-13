@@ -331,28 +331,6 @@ def _process_symbol(client: BitunixClient, sym: str, s: dict,
         if s["state"] != "WATCHING":
             break
 
-        # Time window filter
-        candle_dt  = datetime.fromtimestamp(c1["time"] / 1000, tz=timezone.utc)
-        candle_hour = candle_dt.hour
-        candle_dow  = candle_dt.weekday()
-        windows = cfg.get("windows")
-        if windows:
-            in_window = False
-            for sh, eh in windows:
-                if sh <= eh:
-                    if sh <= candle_hour < eh:
-                        in_window = True; break
-                else:
-                    if candle_hour >= sh or candle_hour < eh:
-                        in_window = True; break
-            if not in_window:
-                log.info(f"  {sym}: outside trade window "
-                         f"({candle_dt.strftime('%a %H:%M')} UTC) — skip")
-                continue
-        if candle_dow in cfg.get("skip_days", set()):
-            log.info(f"  {sym}: skip day ({candle_dt.strftime('%a')} UTC) — skip")
-            continue
-
         # Rolling vol average (exclude current candle)
         prior_vols = [v for v in list(s["vol_window"])[:-1] if v > 0]
         if not prior_vols:
@@ -374,37 +352,66 @@ def _process_symbol(client: BitunixClient, sym: str, s: dict,
         if atr == 0:
             continue
 
-        # Enter SAME direction as spike (momentum continuation)
+        # Spike confirmed — generate arm_id before window check (needed for shadow events)
         price     = c1["close"]
+        direction = "LONG" if body > 0 else "SHORT"
         arm_id    = arm_log.new_arm_id()
         arm_time  = now_utc().strftime("%Y-%m-%d %H:%M:%S")
+        vol_ratio = vol_now / vol_avg
 
+        # Time window filter
+        candle_dt   = datetime.fromtimestamp(c1["time"] / 1000, tz=timezone.utc)
+        candle_hour = candle_dt.hour
+        candle_dow  = candle_dt.weekday()
+        windows     = cfg.get("windows")
+        in_window   = True
+        if windows:
+            in_window = False
+            for sh, eh in windows:
+                if sh <= eh:
+                    if sh <= candle_hour < eh:
+                        in_window = True; break
+                else:
+                    if candle_hour >= sh or candle_hour < eh:
+                        in_window = True; break
+        skip_day = candle_dow in cfg.get("skip_days", set())
+
+        if not in_window or skip_day:
+            # Shadow: record the out-of-window spike signal
+            wtp = (price + atr * TP_MULT) if direction == "LONG" else (price - atr * TP_MULT)
+            wsl = (price - atr * SL_MULT) if direction == "LONG" else (price + atr * SL_MULT)
+            arm_log.log_arm_event(
+                arm_id, STRATEGY, sym, arm_time, price, direction,
+                "PENDING", shadow=True, atr=atr, would_be_tp=wtp, would_be_sl=wsl,
+            )
+            log.info(f"  {sym}: shadow {direction} spike vol={vol_ratio:.1f}x "
+                     f"({candle_dt.strftime('%a %H:%M')} UTC outside window)")
+            continue
+
+        # In window — apply cooldown and enter
         if body > 0:
-            # Bullish spike → LONG
             if s["long_blocked"] > 0:
                 log.info(f"  {sym}: spike signal blocked [LONG cooldown]")
                 arm_log.log_arm_event(arm_id, STRATEGY, sym, arm_time, price,
                                       "LONG", "NO_FIRE", disarm_price=price,
-                                      no_fire_reason="COOLDOWN")
+                                      no_fire_reason="COOLDOWN", atr=atr)
                 continue
             s["pending_side"] = "LONG"
             s["pending_hw"]   = atr
         else:
-            # Bearish spike → SHORT
             if s["short_blocked"] > 0:
                 log.info(f"  {sym}: spike signal blocked [SHORT cooldown]")
                 arm_log.log_arm_event(arm_id, STRATEGY, sym, arm_time, price,
                                       "SHORT", "NO_FIRE", disarm_price=price,
-                                      no_fire_reason="COOLDOWN")
+                                      no_fire_reason="COOLDOWN", atr=atr)
                 continue
             s["pending_side"] = "SHORT"
             s["pending_hw"]   = atr
 
-        s["arm_id"]   = arm_id
-        s["arm_time"] = arm_time
+        s["arm_id"]    = arm_id
+        s["arm_time"]  = arm_time
         s["arm_price"] = price
 
-        vol_ratio = vol_now / vol_avg
         log.info(f"  {sym}: {'BULLISH' if body > 0 else 'BEARISH'} spike  "
                  f"vol={vol_ratio:.1f}x avg  atr={atr:.4f}  "
                  f"→ ENTRY_PENDING {s['pending_side']}")
@@ -435,7 +442,7 @@ def _enter_pending(client: BitunixClient, sym: str, s: dict,
         log.info(f"  {sym}: SKIP — TP dist {tp_dist:.4f} ≤ fee {fee_cost:.4f}")
         arm_log.log_arm_event(s["arm_id"], STRATEGY, sym, s["arm_time"], s["arm_price"],
                               side, "NO_FIRE", disarm_price=entry_price,
-                              no_fire_reason="FEE_GATE")
+                              no_fire_reason="FEE_GATE", atr=atr)
         s["state"] = "WATCHING"
         s["pending_side"] = s["pending_hw"] = None
         s["arm_id"] = s["arm_time"] = s["arm_price"] = None
@@ -448,7 +455,7 @@ def _enter_pending(client: BitunixClient, sym: str, s: dict,
         log.info(f"  {sym}: qty {qty} < min {min_qty}, skip")
         arm_log.log_arm_event(s["arm_id"], STRATEGY, sym, s["arm_time"], s["arm_price"],
                               side, "NO_FIRE", disarm_price=entry_price,
-                              no_fire_reason="MIN_QTY")
+                              no_fire_reason="MIN_QTY", atr=atr)
         s["state"] = "WATCHING"
         s["pending_side"] = s["pending_hw"] = None
         s["arm_id"] = s["arm_time"] = s["arm_price"] = None
@@ -461,14 +468,14 @@ def _enter_pending(client: BitunixClient, sym: str, s: dict,
     if order_id is None:
         arm_log.log_arm_event(s["arm_id"], STRATEGY, sym, s["arm_time"], s["arm_price"],
                               side, "NO_FIRE", disarm_price=entry_price,
-                              no_fire_reason="ORDER_FAILED")
+                              no_fire_reason="ORDER_FAILED", atr=atr)
         s["state"] = "WATCHING"
         s["pending_side"] = s["pending_hw"] = None
         s["arm_id"] = s["arm_time"] = s["arm_price"] = None
         return
 
     arm_log.log_arm_event(s["arm_id"], STRATEGY, sym, s["arm_time"], s["arm_price"],
-                          side, "FIRED", disarm_price=entry_price)
+                          side, "FIRED", disarm_price=entry_price, atr=atr)
     log_trade({
         "symbol":       sym,
         "side":         side,
@@ -490,6 +497,7 @@ def _enter_pending(client: BitunixClient, sym: str, s: dict,
         "sl_price":    sl_price,
         "qty":         qty,
         "opened_at":   now_utc(),
+        "arm_id":      s["arm_id"],
         "debug":       debug,
     }
     s["pending_side"] = s["pending_hw"] = None
@@ -529,6 +537,12 @@ def _monitor_trade(client: BitunixClient, sym: str, s: dict,
 
         if outcome:
             log.info(f"  {sym} [DEBUG]: {outcome} exit  held={held_mins:.1f}min")
+            exit_price = tp if outcome == "TP" else (sl if outcome == "SL" else price)
+            arm_log.log_close_event(
+                pos.get("arm_id", ""), STRATEGY, sym, side,
+                outcome, exit_price, held_mins,
+                arm_log.calc_pnl(side, pos["entry_price"], exit_price, pos["qty"], ROUND_TRIP_FEE),
+            )
             if outcome == "SL":
                 if side == "LONG": s["long_blocked"]  = COOLDOWN
                 else:              s["short_blocked"] = COOLDOWN
@@ -542,6 +556,25 @@ def _monitor_trade(client: BitunixClient, sym: str, s: dict,
 
     if not live:
         log.info(f"  {sym}: position closed by exchange (TP/SL hit)")
+        price  = c1["close"]
+        tp_hit = price >= tp if side == "LONG" else price <= tp
+        sl_hit = price <= sl if side == "LONG" else price >= sl
+        if tp_hit and not sl_hit:
+            outcome    = "TP"
+            exit_price = tp
+        elif sl_hit:
+            outcome    = "SL"
+            exit_price = sl
+            if side == "LONG": s["long_blocked"]  = COOLDOWN
+            else:              s["short_blocked"] = COOLDOWN
+        else:
+            outcome    = "EXCHANGE_CLOSED"
+            exit_price = price
+        arm_log.log_close_event(
+            pos.get("arm_id", ""), STRATEGY, sym, side,
+            outcome, exit_price, held_mins,
+            arm_log.calc_pnl(side, pos["entry_price"], exit_price, pos["qty"], ROUND_TRIP_FEE),
+        )
         s["state"]    = "WATCHING"
         s["position"] = None
         return
@@ -555,6 +588,12 @@ def _monitor_trade(client: BitunixClient, sym: str, s: dict,
     if held_mins >= MAX_HOLD_MINS:
         log.info(f"  {sym}: time exit after {held_mins:.1f}min")
         if close_position(client, pos["position_id"], sym, debug):
+            price = c1["close"]
+            arm_log.log_close_event(
+                pos.get("arm_id", ""), STRATEGY, sym, side,
+                "TIME", price, held_mins,
+                arm_log.calc_pnl(side, pos["entry_price"], price, pos["qty"], ROUND_TRIP_FEE),
+            )
             s["state"]    = "WATCHING"
             s["position"] = None
 
@@ -639,6 +678,7 @@ def run(debug: bool, symbols: list[str] = None) -> None:
                 "sl_price":    None,
                 "qty":         float(p.get("qty", 0)),
                 "opened_at":   now_utc(),
+                "arm_id":      "",
                 "debug":       False,
             }
             log.info(f"  Hydrated {sym} [{side}] @ "
