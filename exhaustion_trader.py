@@ -43,8 +43,11 @@ from auth import BitunixClient
 from config import API_KEY, SECRET_KEY
 from market import fetch_ticker
 from log_cap import start_logging
+import arm_log
 
 start_logging("exhaustion_trader")
+
+STRATEGY = "exhaustion"
 
 # ── Strategy parameters ────────────────────────────────────────────────────────
 
@@ -269,16 +272,19 @@ def log_trade(body: dict) -> None:
     buy_sell = "BUY" if body.get("side") == "LONG" else "SELL"
     row = [
         ts, ts,
-        "symbol",     body["symbol"],
-        "qty",        body["qty"],
-        "side",       buy_sell,
-        "orderType",  "MARKET",
-        "tradeSide",  "OPEN",
-        "tpPrice",    body["tp_price"],
-        "slPrice",    body["sl_price"],
-        "tpStopType", "MARK_PRICE",
-        "slStopType", "MARK_PRICE",
-        "entryPrice", body["entry_price"],
+        "symbol",      body["symbol"],
+        "qty",         body["qty"],
+        "side",        buy_sell,
+        "orderType",   "MARKET",
+        "tradeSide",   "OPEN",
+        "tpPrice",     body["tp_price"],
+        "slPrice",     body["sl_price"],
+        "tpStopType",  "MARK_PRICE",
+        "slStopType",  "MARK_PRICE",
+        "entryPrice",  body["entry_price"],
+        "armId",       body.get("arm_id", ""),
+        "armPrice",    body.get("arm_price", ""),
+        "signalPrice", body.get("signal_price", ""),
     ]
     with open(TRADE_CSV, "a", newline="") as f:
         csv.writer(f).writerow(row)
@@ -395,11 +401,22 @@ def _process_symbol(client: BitunixClient, sym: str, s: dict,
             log.info(f"  {sym}: skip day ({candle_dt.strftime('%a')} UTC) — skip")
             continue
 
-        # ATR sizing
+        # ATR sizing (needed for filter and TP/SL sizing)
         atr_list = list(s["atr_window"])[:-1]
         atr = compute_atr(atr_list)
         if atr == 0:
             continue
+
+        # Signal check first — so we only log/filter real signals
+        streak_dir = check_exhaustion_signal(list(s["streak_window"]), s["vol_window"])
+        if streak_dir is None:
+            continue
+
+        # Signal confirmed — generate arm_id now
+        price     = c1["close"]
+        arm_id    = arm_log.new_arm_id()
+        arm_time  = now_utc().strftime("%Y-%m-%d %H:%M:%S")
+        direction = "SHORT" if streak_dir == 1 else "LONG"
 
         # ATR filter: skip if volatility is below threshold
         if ATR_FILTER_THRESH is not None:
@@ -418,16 +435,18 @@ def _process_symbol(client: BitunixClient, sym: str, s: dict,
                     if atr < atr_avg * ATR_FILTER_THRESH:
                         log.info(f"  {sym}: ATR filter — atr={atr:.4f} < "
                                  f"{ATR_FILTER_THRESH}× avg={atr_avg:.4f} — skip")
+                        arm_log.log_arm_event(arm_id, STRATEGY, sym, arm_time, price,
+                                              direction, "NO_FIRE", disarm_price=price,
+                                              no_fire_reason="ATR_FILTER")
                         continue
-
-        streak_dir = check_exhaustion_signal(list(s["streak_window"]), s["vol_window"])
-        if streak_dir is None:
-            continue
 
         if streak_dir == 1:
             # Up streak exhausted → SHORT
             if s["short_blocked"] > 0:
                 log.info(f"  {sym}: exhaustion signal blocked [SHORT cooldown]")
+                arm_log.log_arm_event(arm_id, STRATEGY, sym, arm_time, price,
+                                      "SHORT", "NO_FIRE", disarm_price=price,
+                                      no_fire_reason="COOLDOWN")
                 continue
             s["pending_side"] = "SHORT"
             s["pending_atr"]  = atr
@@ -435,15 +454,22 @@ def _process_symbol(client: BitunixClient, sym: str, s: dict,
             # Down streak exhausted → LONG
             if s["long_blocked"] > 0:
                 log.info(f"  {sym}: exhaustion signal blocked [LONG cooldown]")
+                arm_log.log_arm_event(arm_id, STRATEGY, sym, arm_time, price,
+                                      "LONG", "NO_FIRE", disarm_price=price,
+                                      no_fire_reason="COOLDOWN")
                 continue
             s["pending_side"] = "LONG"
             s["pending_atr"]  = atr
 
+        s["arm_id"]    = arm_id
+        s["arm_time"]  = arm_time
+        s["arm_price"] = price
+
         final_vol   = list(s["streak_window"])[-1]["volume"]
         prior_vols  = [v for v in list(s["vol_window"])[:-1] if v > 0]
         vol_ratio   = final_vol / (sum(prior_vols) / len(prior_vols)) if prior_vols else 0
-        direction   = "UP" if streak_dir == 1 else "DOWN"
-        log.info(f"  {sym}: {STREAK_LEN}-candle {direction} streak exhausted  "
+        streak_label = "UP" if streak_dir == 1 else "DOWN"
+        log.info(f"  {sym}: {STREAK_LEN}-candle {streak_label} streak exhausted  "
                  f"vol={vol_ratio:.1f}x avg  atr={atr:.4f}  "
                  f"→ ENTRY_PENDING {s['pending_side']}")
         s["state"] = "ENTRY_PENDING"
@@ -471,8 +497,12 @@ def _enter_pending(client: BitunixClient, sym: str, s: dict,
     fee_cost = entry_price * ROUND_TRIP_FEE
     if tp_dist <= fee_cost:
         log.info(f"  {sym}: SKIP — TP dist {tp_dist:.4f} ≤ fee {fee_cost:.4f}")
+        arm_log.log_arm_event(s["arm_id"], STRATEGY, sym, s["arm_time"], s["arm_price"],
+                              side, "NO_FIRE", disarm_price=entry_price,
+                              no_fire_reason="FEE_GATE")
         s["state"] = "WATCHING"
         s["pending_side"] = s["pending_atr"] = None
+        s["arm_id"] = s["arm_time"] = s["arm_price"] = None
         return
 
     notional = balance * MAX_TRADE_PCT * LEVERAGE
@@ -480,8 +510,12 @@ def _enter_pending(client: BitunixClient, sym: str, s: dict,
     min_qty  = {"BTCUSDT": 0.0001, "ETHUSDT": 0.003}.get(sym, 0.001)
     if qty < min_qty:
         log.info(f"  {sym}: qty {qty} < min {min_qty}, skip")
+        arm_log.log_arm_event(s["arm_id"], STRATEGY, sym, s["arm_time"], s["arm_price"],
+                              side, "NO_FIRE", disarm_price=entry_price,
+                              no_fire_reason="MIN_QTY")
         s["state"] = "WATCHING"
         s["pending_side"] = s["pending_atr"] = None
+        s["arm_id"] = s["arm_time"] = s["arm_price"] = None
         return
 
     log.info(f"  {sym}: ENTER {side}  entry≈{entry_price:.4f}  "
@@ -489,17 +523,26 @@ def _enter_pending(client: BitunixClient, sym: str, s: dict,
 
     order_id = place_order(client, sym, side, qty, tp_price, sl_price, debug)
     if order_id is None:
+        arm_log.log_arm_event(s["arm_id"], STRATEGY, sym, s["arm_time"], s["arm_price"],
+                              side, "NO_FIRE", disarm_price=entry_price,
+                              no_fire_reason="ORDER_FAILED")
         s["state"] = "WATCHING"
         s["pending_side"] = s["pending_atr"] = None
+        s["arm_id"] = s["arm_time"] = s["arm_price"] = None
         return
 
+    arm_log.log_arm_event(s["arm_id"], STRATEGY, sym, s["arm_time"], s["arm_price"],
+                          side, "FIRED", disarm_price=entry_price)
     log_trade({
-        "symbol":      sym,
-        "side":        side,
-        "qty":         qty,
-        "tp_price":    round_price(sym, tp_price),
-        "sl_price":    round_price(sym, sl_price),
-        "entry_price": entry_price,
+        "symbol":       sym,
+        "side":         side,
+        "qty":          qty,
+        "tp_price":     round_price(sym, tp_price),
+        "sl_price":     round_price(sym, sl_price),
+        "entry_price":  entry_price,
+        "arm_id":       s["arm_id"],
+        "arm_price":    s["arm_price"],
+        "signal_price": entry_price,
     })
 
     s["state"]    = "IN_TRADE"
@@ -514,6 +557,7 @@ def _enter_pending(client: BitunixClient, sym: str, s: dict,
         "debug":       debug,
     }
     s["pending_side"] = s["pending_atr"] = None
+    s["arm_id"] = s["arm_time"] = s["arm_price"] = None
 
 
 def _monitor_trade(client: BitunixClient, sym: str, s: dict,
@@ -645,6 +689,10 @@ def run(debug: bool, symbols: list[str] = None) -> None:
             "position":      None,
             "long_blocked":  0,
             "short_blocked": 0,
+            # Arm event tracking
+            "arm_id":        None,
+            "arm_time":      None,
+            "arm_price":     None,
         }
         log.info(f"  {sym}: {len(candles_1m)} candles loaded — ready")
 

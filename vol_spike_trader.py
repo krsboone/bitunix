@@ -38,8 +38,11 @@ from auth import BitunixClient
 from config import API_KEY, SECRET_KEY
 from market import fetch_ticker
 from log_cap import start_logging
+import arm_log
 
 start_logging("vol_spike_trader")
+
+STRATEGY = "vol_spike"
 
 # ── Strategy parameters ────────────────────────────────────────────────────────
 
@@ -222,16 +225,19 @@ def log_trade(body: dict) -> None:
     buy_sell = "BUY" if body.get("side") == "LONG" else "SELL"
     row = [
         ts, ts,
-        "symbol",     body["symbol"],
-        "qty",        body["qty"],
-        "side",       buy_sell,
-        "orderType",  "MARKET",
-        "tradeSide",  "OPEN",
-        "tpPrice",    body["tp_price"],
-        "slPrice",    body["sl_price"],
-        "tpStopType", "MARK_PRICE",
-        "slStopType", "MARK_PRICE",
-        "entryPrice", body["entry_price"],
+        "symbol",      body["symbol"],
+        "qty",         body["qty"],
+        "side",        buy_sell,
+        "orderType",   "MARKET",
+        "tradeSide",   "OPEN",
+        "tpPrice",     body["tp_price"],
+        "slPrice",     body["sl_price"],
+        "tpStopType",  "MARK_PRICE",
+        "slStopType",  "MARK_PRICE",
+        "entryPrice",  body["entry_price"],
+        "armId",       body.get("arm_id", ""),
+        "armPrice",    body.get("arm_price", ""),
+        "signalPrice", body.get("signal_price", ""),
     ]
     with open(TRADE_CSV, "a", newline="") as f:
         csv.writer(f).writerow(row)
@@ -369,11 +375,17 @@ def _process_symbol(client: BitunixClient, sym: str, s: dict,
             continue
 
         # Enter SAME direction as spike (momentum continuation)
-        price = c1["close"]
+        price     = c1["close"]
+        arm_id    = arm_log.new_arm_id()
+        arm_time  = now_utc().strftime("%Y-%m-%d %H:%M:%S")
+
         if body > 0:
             # Bullish spike → LONG
             if s["long_blocked"] > 0:
                 log.info(f"  {sym}: spike signal blocked [LONG cooldown]")
+                arm_log.log_arm_event(arm_id, STRATEGY, sym, arm_time, price,
+                                      "LONG", "NO_FIRE", disarm_price=price,
+                                      no_fire_reason="COOLDOWN")
                 continue
             s["pending_side"] = "LONG"
             s["pending_hw"]   = atr
@@ -381,9 +393,16 @@ def _process_symbol(client: BitunixClient, sym: str, s: dict,
             # Bearish spike → SHORT
             if s["short_blocked"] > 0:
                 log.info(f"  {sym}: spike signal blocked [SHORT cooldown]")
+                arm_log.log_arm_event(arm_id, STRATEGY, sym, arm_time, price,
+                                      "SHORT", "NO_FIRE", disarm_price=price,
+                                      no_fire_reason="COOLDOWN")
                 continue
             s["pending_side"] = "SHORT"
             s["pending_hw"]   = atr
+
+        s["arm_id"]   = arm_id
+        s["arm_time"] = arm_time
+        s["arm_price"] = price
 
         vol_ratio = vol_now / vol_avg
         log.info(f"  {sym}: {'BULLISH' if body > 0 else 'BEARISH'} spike  "
@@ -414,8 +433,12 @@ def _enter_pending(client: BitunixClient, sym: str, s: dict,
     fee_cost = entry_price * ROUND_TRIP_FEE
     if tp_dist <= fee_cost:
         log.info(f"  {sym}: SKIP — TP dist {tp_dist:.4f} ≤ fee {fee_cost:.4f}")
+        arm_log.log_arm_event(s["arm_id"], STRATEGY, sym, s["arm_time"], s["arm_price"],
+                              side, "NO_FIRE", disarm_price=entry_price,
+                              no_fire_reason="FEE_GATE")
         s["state"] = "WATCHING"
         s["pending_side"] = s["pending_hw"] = None
+        s["arm_id"] = s["arm_time"] = s["arm_price"] = None
         return
 
     notional = balance * MAX_TRADE_PCT * LEVERAGE
@@ -423,8 +446,12 @@ def _enter_pending(client: BitunixClient, sym: str, s: dict,
     min_qty  = {"BTCUSDT": 0.0001, "ETHUSDT": 0.003}.get(sym, 0.001)
     if qty < min_qty:
         log.info(f"  {sym}: qty {qty} < min {min_qty}, skip")
+        arm_log.log_arm_event(s["arm_id"], STRATEGY, sym, s["arm_time"], s["arm_price"],
+                              side, "NO_FIRE", disarm_price=entry_price,
+                              no_fire_reason="MIN_QTY")
         s["state"] = "WATCHING"
         s["pending_side"] = s["pending_hw"] = None
+        s["arm_id"] = s["arm_time"] = s["arm_price"] = None
         return
 
     log.info(f"  {sym}: ENTER {side}  entry≈{entry_price:.4f}  "
@@ -432,17 +459,26 @@ def _enter_pending(client: BitunixClient, sym: str, s: dict,
 
     order_id = place_order(client, sym, side, qty, tp_price, sl_price, debug)
     if order_id is None:
+        arm_log.log_arm_event(s["arm_id"], STRATEGY, sym, s["arm_time"], s["arm_price"],
+                              side, "NO_FIRE", disarm_price=entry_price,
+                              no_fire_reason="ORDER_FAILED")
         s["state"] = "WATCHING"
         s["pending_side"] = s["pending_hw"] = None
+        s["arm_id"] = s["arm_time"] = s["arm_price"] = None
         return
 
+    arm_log.log_arm_event(s["arm_id"], STRATEGY, sym, s["arm_time"], s["arm_price"],
+                          side, "FIRED", disarm_price=entry_price)
     log_trade({
-        "symbol":      sym,
-        "side":        side,
-        "qty":         qty,
-        "tp_price":    round_price(sym, tp_price),
-        "sl_price":    round_price(sym, sl_price),
-        "entry_price": entry_price,
+        "symbol":       sym,
+        "side":         side,
+        "qty":          qty,
+        "tp_price":     round_price(sym, tp_price),
+        "sl_price":     round_price(sym, sl_price),
+        "entry_price":  entry_price,
+        "arm_id":       s["arm_id"],
+        "arm_price":    s["arm_price"],
+        "signal_price": entry_price,
     })
 
     s["state"]    = "IN_TRADE"
@@ -457,6 +493,7 @@ def _enter_pending(client: BitunixClient, sym: str, s: dict,
         "debug":       debug,
     }
     s["pending_side"] = s["pending_hw"] = None
+    s["arm_id"] = s["arm_time"] = s["arm_price"] = None
 
 
 def _monitor_trade(client: BitunixClient, sym: str, s: dict,
@@ -579,6 +616,10 @@ def run(debug: bool, symbols: list[str] = None) -> None:
             "position":      None,
             "long_blocked":  0,
             "short_blocked": 0,
+            # Arm event tracking
+            "arm_id":        None,
+            "arm_time":      None,
+            "arm_price":     None,
         }
         log.info(f"  {sym}: {len(candles_1m)} candles loaded — ready")
 

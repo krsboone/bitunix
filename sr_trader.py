@@ -35,8 +35,11 @@ from auth import BitunixClient
 from config import API_KEY, SECRET_KEY
 from market import fetch_ticker, compute_sigma
 from log_cap import start_logging
+import arm_log
 
 start_logging("sr_trader")
+
+STRATEGY = "sr"
 
 # ── Per-symbol sweep-optimised config ─────────────────────────────────────────
 
@@ -295,16 +298,19 @@ def log_trade(body: dict) -> None:
     buy_sell = "BUY" if side == "LONG" else "SELL"
     row = [
         ts, ts,
-        "symbol",     body.get("symbol"),
-        "qty",        body.get("qty"),
-        "side",       buy_sell,
-        "orderType",  "MARKET",
-        "tradeSide",  "OPEN",
-        "tpPrice",    body.get("tp_price"),
-        "slPrice",    body.get("sl_price"),
-        "tpStopType", "MARK_PRICE",
-        "slStopType", "MARK_PRICE",
-        "entryPrice", body.get("entry_price"),
+        "symbol",      body.get("symbol"),
+        "qty",         body.get("qty"),
+        "side",        buy_sell,
+        "orderType",   "MARKET",
+        "tradeSide",   "OPEN",
+        "tpPrice",     body.get("tp_price"),
+        "slPrice",     body.get("sl_price"),
+        "tpStopType",  "MARK_PRICE",
+        "slStopType",  "MARK_PRICE",
+        "entryPrice",  body.get("entry_price"),
+        "armId",       body.get("arm_id", ""),
+        "armPrice",    body.get("arm_price", ""),
+        "signalPrice", body.get("signal_price", ""),
     ]
     with open(TRADE_CSV, "a", newline="") as f:
         csv.writer(f).writerow(row)
@@ -409,6 +415,10 @@ def run(debug: bool, symbols: list[str] = None) -> None:
             "broken_levels":    {},
             # Open position (None when WATCHING/ARMED)
             "position":         None,
+            # Arm event tracking
+            "arm_id":           None,
+            "arm_time":         None,
+            "arm_price":        None,
         }
         log.info(f"  {sym}: {len(buf)} candles loaded — ready")
 
@@ -517,8 +527,13 @@ def _process_symbol(client: BitunixClient, sym: str, s: dict, cfg: dict,
         # Disarm if price has moved too far away
         if dist_pct > cfg["arm_distance"] * 3:
             log.info(f"  {sym}: disarmed (price moved away from {level:.4f})")
+            arm_log.log_arm_event(s["arm_id"], STRATEGY, sym, s["arm_time"], s["arm_price"],
+                                  "LONG" if direction == "UP" else "SHORT",
+                                  "NO_FIRE", disarm_price=price,
+                                  no_fire_reason="PRICE_MOVED_AWAY")
             s["state"] = "WATCHING"
             s["armed_level"] = s["armed_dir"] = None
+            s["arm_id"] = s["arm_time"] = s["arm_price"] = None
             return
 
         # Check breakout
@@ -586,6 +601,9 @@ def _process_symbol(client: BitunixClient, sym: str, s: dict, cfg: dict,
         s["state"]       = "ARMED"
         s["armed_level"] = nearest
         s["armed_dir"]   = direction
+        s["arm_id"]      = arm_log.new_arm_id()
+        s["arm_time"]    = now_utc().strftime("%Y-%m-%d %H:%M:%S")
+        s["arm_price"]   = price
         log.info(f"  {sym}: ARMED  level={nearest:.4f}  dir={direction}")
 
 
@@ -623,21 +641,31 @@ def _enter_trade(client: BitunixClient, sym: str, s: dict, cfg: dict,
 
     order_id = place_order(client, sym, side, qty, tp_price, sl_price, debug)
     if order_id is None:
+        arm_log.log_arm_event(s["arm_id"], STRATEGY, sym, s["arm_time"], s["arm_price"],
+                              side, "NO_FIRE", disarm_price=entry,
+                              no_fire_reason="ORDER_FAILED")
+        s["arm_id"] = s["arm_time"] = s["arm_price"] = None
         return
 
+    arm_log.log_arm_event(s["arm_id"], STRATEGY, sym, s["arm_time"], s["arm_price"],
+                          side, "FIRED", disarm_price=entry)
     log_trade({
-        "symbol":      sym,
-        "side":        side,
-        "qty":         qty,
-        "tp_price":    tp_price,
-        "sl_price":    sl_price,
-        "entry_price": entry,
-        "sigma":       sigma,
+        "symbol":       sym,
+        "side":         side,
+        "qty":          qty,
+        "tp_price":     tp_price,
+        "sl_price":     sl_price,
+        "entry_price":  entry,
+        "sigma":        sigma,
+        "arm_id":       s["arm_id"],
+        "arm_price":    s["arm_price"],
+        "signal_price": entry,
     })
 
     s["broken_levels"][level] = c["time"]
     s["state"]       = "IN_TRADE"
     s["armed_level"] = s["armed_dir"] = None
+    s["arm_id"] = s["arm_time"] = s["arm_price"] = None
     s["position"]    = {
         "position_id": order_id,
         "side":        side,
