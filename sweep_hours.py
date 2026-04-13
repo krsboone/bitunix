@@ -32,19 +32,15 @@ SIM_PRESETS = {
     },
     "vol_spike": {
         "script":    "vol_spike_sim.py",
-        #"args":      ["--flip", "--tp-mult", "1.5", "--sl-mult", "1.0"],
-        #"tp_mult":   1.5,
-        #"sl_mult":   1.0,
-        "args":      ["--flip", "--tp-mult", "2.5", "--sl-mult", "0.2"],
+        "args":      ["--flip", "--tp-mult", "2.5", "--sl-mult", "0.5"],
         "tp_mult":   2.5,
-        "sl_mult":   0.2,
-
+        "sl_mult":   0.5,
     },
     "exhaustion": {
         "script":    "exhaustion_sim.py",
-        "args":      ["--tp-mult", "4.5", "--sl-mult", "0.2"],
+        "args":      ["--tp-mult", "4.5", "--sl-mult", "0.5"],
         "tp_mult":   4.5,
-        "sl_mult":   0.2,
+        "sl_mult":   0.5,
     },
     "sr": {
         "script":    "sr_sim.py",

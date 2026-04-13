@@ -58,7 +58,7 @@ VOL_MULT      = 1.5    # final candle volume must be ≥ vol_mult × rolling avg
 VOL_LOOKBACK  = 20     # candles for rolling volume average
 ATR_PERIOD    = 14     # candles for ATR calculation
 TP_MULT       = 4.5    # TP = entry ± atr × tp_mult
-SL_MULT       = 0.2    # SL = entry ∓ atr × sl_mult
+SL_MULT       = 0.5    # SL = entry ∓ atr × sl_mult  (raised from 0.2 — live spread noise)
 MAX_HOLD_MINS = 33
 COOLDOWN      = 10     # candles to block same-direction re-entry after SL
 
