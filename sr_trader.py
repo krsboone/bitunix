@@ -48,15 +48,15 @@ SYMBOL_CONFIGS = {
         "vol_mult":    2.0,
         "breakout":    0.0010,
         "arm_distance": 0.0015,
-        "windows":     [(6, 9)],   # 06:00–09:00 UTC Mon-Fri
-        "skip_days":   {5, 6},     # Sat, Sun
+        "windows":     [],         # all hours (shadow data: 60% TP / 1% SL across 295 resolved events)
+        "skip_days":   set(),      # all days
     },
     "ETHUSDT": {
         "vol_mult":    3.0,
         "breakout":    0.0015,
         "arm_distance": 0.0030,
-        "windows":     [(7, 9)],   # 07:00–09:00 UTC Mon-Fri
-        "skip_days":   {5, 6},     # Sat, Sun
+        "windows":     [],         # all hours (shadow data: 60% TP / 1% SL across 295 resolved events)
+        "skip_days":   set(),      # all days
     },
 }
 SYMBOLS = list(SYMBOL_CONFIGS.keys())
