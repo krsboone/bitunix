@@ -69,6 +69,7 @@ SYMBOLS = list(SYMBOL_CONFIGS.keys())
 TP_MULT        = 1.0    # sweep winner: both symbols
 SL_MULT        = 3.0    # sweep winner: both symbols
 Z_ENTRY        = 1.2
+Z_RETEST       = 0.8    # Z-score threshold for retest bounce confirmation (sweep candidate)
 VOL_LOOKBACK   = 20
 SIGMA_CANDLES  = 20
 SIGNAL_CANDLES = 5
@@ -564,14 +565,18 @@ def _process_symbol(client: BitunixClient, sym: str, s: dict, cfg: dict,
             s["arm_id"] = s["arm_time"] = s["arm_price"] = None
             return
 
-        # Enter when price pulls back within arm_distance and bounces
+        # Enter when price pulls back within arm_distance and bounce is confirmed
         if dist_pct <= cfg["arm_distance"]:
             body_ok = (price > c["open"]) if side == "LONG" else (price < c["open"])
-            if body_ok:
-                log.info(f"  {sym}: RETEST confirmed @ {level:.4f}  dist={dist_pct*100:.3f}%  → {side}")
+            z_ok    = (z >= Z_RETEST)     if side == "LONG" else (z <= -Z_RETEST)
+            if body_ok and z_ok:
+                log.info(f"  {sym}: RETEST confirmed @ {level:.4f}  dist={dist_pct*100:.3f}%  z={z:+.3f}  → {side}")
                 _enter_trade(client, sym, s, cfg, c, side, level, sigma, balance, debug)
             else:
-                log.info(f"  {sym}: RETEST at level {level:.4f} — awaiting bounce (body not confirmed)")
+                reasons = []
+                if not body_ok: reasons.append("body")
+                if not z_ok:    reasons.append(f"z={z:+.3f}<{Z_RETEST if side=='LONG' else -Z_RETEST:+.1f}")
+                log.info(f"  {sym}: RETEST at level {level:.4f} — awaiting bounce [{', '.join(reasons)}]")
         else:
             log.info(f"  {sym}: RETEST waiting  level={level:.4f}  dist={dist_pct*100:.3f}%  age={retest_age_mins:.1f}min")
         return
