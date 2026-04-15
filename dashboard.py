@@ -29,10 +29,11 @@ STRATEGY_COLORS = {
     "bb":         "#3b82f6",   # blue
     "sr":         "#10b981",   # emerald
     "sr_rt":      "#06b6d4",   # cyan
+    "ema_trend":  "#8b5cf6",   # violet
     "vol_spike":  "#f59e0b",   # amber
     "exhaustion": "#ec4899",   # pink
 }
-STRATEGY_ORDER = ["bb", "sr", "sr_rt", "vol_spike", "exhaustion"]
+STRATEGY_ORDER = ["bb", "sr", "sr_rt", "ema_trend", "vol_spike", "exhaustion"]
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -186,10 +187,11 @@ def compute(arms: list[dict], closes: list[dict]) -> dict:
                             if any(c["strategy"] == s for c in closes)]
         for s in all_close_strats:
             s_cl = [c for c in closes if c["strategy"] == s]
-            tp_n = sum(1 for c in s_cl if c["outcome"] == "TP")
-            sl_n = sum(1 for c in s_cl if c["outcome"] == "SL")
-            tx_n = sum(1 for c in s_cl if c["outcome"] == "TIME")
-            ex_n = sum(1 for c in s_cl if c["outcome"] == "EXCHANGE_CLOSED")
+            tp_n  = sum(1 for c in s_cl if c["outcome"] == "TP")
+            sl_n  = sum(1 for c in s_cl if c["outcome"] == "SL")
+            tx_n  = sum(1 for c in s_cl if c["outcome"] == "TIME")
+            ex_n  = sum(1 for c in s_cl if c["outcome"] == "EXCHANGE_CLOSED")
+            ema_n = sum(1 for c in s_cl if c["outcome"] == "EMA_EXIT")
             pnls  = [p for p in (safe_float(c["realized_pnl"]) for c in s_cl)
                      if p is not None]
             holds = [h for h in (safe_float(c["hold_mins"]) for c in s_cl)
@@ -197,10 +199,11 @@ def compute(arms: list[dict], closes: list[dict]) -> dict:
             close_stats[s] = {
                 "total":     len(s_cl),
                 "tp":        tp_n,  "sl":       sl_n,
-                "time":      tx_n,  "ex":       ex_n,
-                "tp_pct":    pct(tp_n, len(s_cl)),
-                "sl_pct":    pct(sl_n, len(s_cl)),
-                "tx_pct":    pct(tx_n, len(s_cl)),
+                "time":      tx_n,  "ex":       ex_n,  "ema":      ema_n,
+                "tp_pct":    pct(tp_n,  len(s_cl)),
+                "sl_pct":    pct(sl_n,  len(s_cl)),
+                "tx_pct":    pct(tx_n,  len(s_cl)),
+                "ema_pct":   pct(ema_n, len(s_cl)),
                 "total_pnl": round(sum(pnls), 4) if pnls else None,
                 "avg_hold":  round(sum(holds) / len(holds), 1) if holds else None,
             }
@@ -264,6 +267,7 @@ def outcome_badge(outcome: str) -> str:
         "TP":             ("#22c55e", "#14532d"),
         "SL":             ("#ef4444", "#450a0a"),
         "TIME":           ("#94a3b8", "#1e293b"),
+        "EMA_EXIT":       ("#8b5cf6", "#2e1065"),
         "EXCHANGE_CLOSED":("#f59e0b", "#451a03"),
     }
     fg, bg = palette.get(outcome, ("#94a3b8", "#1e293b"))
@@ -361,6 +365,7 @@ def build_html(d: dict) -> str:
           <td class="num" style="color:#22c55e">{cs['tp']} ({cs['tp_pct']}%)</td>
           <td class="num" style="color:#ef4444">{cs['sl']} ({cs['sl_pct']}%)</td>
           <td class="num" style="color:#94a3b8">{cs['time']} ({cs['tx_pct']}%)</td>
+          <td class="num" style="color:#8b5cf6">{cs['ema']} ({cs['ema_pct']}%)</td>
           <td class="num" style="color:#94a3b8">{cs['ex']}</td>
           <td class="num" style="color:{pnl_color}">{pnl_str}</td>
           <td class="num">{hold_str}</td>
@@ -614,6 +619,7 @@ def build_html(d: dict) -> str:
         <th>Strategy</th><th class="num">Trades</th>
         <th class="num">TP</th><th class="num">SL</th>
         <th class="num">Time exit</th>
+        <th class="num">EMA exit</th>
         <th class="num">Exch closed</th>
         <th class="num">Net PnL (USDT)</th>
         <th class="num">Avg hold</th>
