@@ -28,10 +28,11 @@ OUT_HTML  = os.path.join("log", "dashboard.html")
 STRATEGY_COLORS = {
     "bb":         "#3b82f6",   # blue
     "sr":         "#10b981",   # emerald
+    "sr_rt":      "#06b6d4",   # cyan
     "vol_spike":  "#f59e0b",   # amber
     "exhaustion": "#ec4899",   # pink
 }
-STRATEGY_ORDER = ["bb", "sr", "vol_spike", "exhaustion"]
+STRATEGY_ORDER = ["bb", "sr", "sr_rt", "vol_spike", "exhaustion"]
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -140,9 +141,8 @@ def compute(arms: list[dict], closes: list[dict]) -> dict:
     shadow_stats = {}
     for s in strats:
         tp_pcts, sl_pcts = [], []
-        for r in shadow_rows:
-            if r["strategy"] != s:
-                continue
+        s_shadow = [r for r in shadow_rows if r["strategy"] == s]
+        for r in s_shadow:
             price = safe_float(r["arm_price"])
             wtp   = safe_float(r["would_be_tp"])
             wsl   = safe_float(r["would_be_sl"])
@@ -151,9 +151,22 @@ def compute(arms: list[dict], closes: list[dict]) -> dict:
                     tp_pcts.append(abs(wtp - price) / price * 100)
                 if wsl:
                     sl_pcts.append(abs(wsl - price) / price * 100)
-        if tp_pcts or sl_pcts:
+        resolved = [r for r in s_shadow if r["outcome"] in ("TP", "SL", "TIME")]
+        tp_n     = sum(1 for r in resolved if r["outcome"] == "TP")
+        sl_n     = sum(1 for r in resolved if r["outcome"] == "SL")
+        tx_n     = sum(1 for r in resolved if r["outcome"] == "TIME")
+        pending_n = sum(1 for r in s_shadow if r["outcome"] == "PENDING")
+        if s_shadow:
             shadow_stats[s] = {
-                "count":      len([r for r in shadow_rows if r["strategy"] == s]),
+                "count":      len(s_shadow),
+                "resolved":   len(resolved),
+                "pending":    pending_n,
+                "tp_n":       tp_n,
+                "sl_n":       sl_n,
+                "tx_n":       tx_n,
+                "tp_pct":     pct(tp_n, len(resolved)),
+                "sl_pct":     pct(sl_n, len(resolved)),
+                "tx_pct":     pct(tx_n, len(resolved)),
                 "avg_tp_pct": round(sum(tp_pcts) / len(tp_pcts), 4) if tp_pcts else None,
                 "avg_sl_pct": round(sum(sl_pcts) / len(sl_pcts), 4) if sl_pcts else None,
             }
@@ -302,17 +315,21 @@ def build_html(d: dict) -> str:
     for s in strats:
         ss = d["shadow_stats"].get(s)
         if ss:
-            tp = f"{ss['avg_tp_pct']:.3f}%" if ss["avg_tp_pct"] else "—"
-            sl = f"{ss['avg_sl_pct']:.3f}%" if ss["avg_sl_pct"] else "—"
+            tp_dist = f"{ss['avg_tp_pct']:.3f}%" if ss["avg_tp_pct"] else "—"
+            sl_dist = f"{ss['avg_sl_pct']:.3f}%" if ss["avg_sl_pct"] else "—"
+            pending_str = f' <span class="muted" style="font-size:0.8em">+{ss["pending"]} pending</span>' if ss["pending"] else ""
             shadow_rows_html += f"""
         <tr>
           <td>{badge(s)}</td>
-          <td class="num">{ss['count']}</td>
-          <td class="num" style="color:#22c55e">{tp}</td>
-          <td class="num" style="color:#ef4444">{sl}</td>
+          <td class="num">{ss['count']}{pending_str}</td>
+          <td class="num" style="color:#22c55e">{ss['tp_n']} ({ss['tp_pct']:.0f}%)</td>
+          <td class="num" style="color:#ef4444">{ss['sl_n']} ({ss['sl_pct']:.0f}%)</td>
+          <td class="num" style="color:#94a3b8">{ss['tx_n']} ({ss['tx_pct']:.0f}%)</td>
+          <td class="num muted">{tp_dist}</td>
+          <td class="num muted">{sl_dist}</td>
         </tr>"""
     if not shadow_rows_html:
-        shadow_rows_html = '<tr><td colspan="4" class="muted center">No shadow events</td></tr>'
+        shadow_rows_html = '<tr><td colspan="7" class="muted center">No shadow events</td></tr>'
 
     # ── ATR stats table rows ───────────────────────────────────────────────────
     atr_rows_html = ""
@@ -344,11 +361,12 @@ def build_html(d: dict) -> str:
           <td class="num" style="color:#22c55e">{cs['tp']} ({cs['tp_pct']}%)</td>
           <td class="num" style="color:#ef4444">{cs['sl']} ({cs['sl_pct']}%)</td>
           <td class="num" style="color:#94a3b8">{cs['time']} ({cs['tx_pct']}%)</td>
+          <td class="num" style="color:#94a3b8">{cs['ex']}</td>
           <td class="num" style="color:{pnl_color}">{pnl_str}</td>
           <td class="num">{hold_str}</td>
         </tr>"""
     else:
-        close_rows_html = '<tr><td colspan="7" class="muted center">No closed trades yet</td></tr>'
+        close_rows_html = '<tr><td colspan="8" class="muted center">No closed trades yet</td></tr>'
 
     # ── Recent events table ───────────────────────────────────────────────────
     recent_rows_html = ""
@@ -482,6 +500,7 @@ def build_html(d: dict) -> str:
     .data-table tr:last-child td {{ border-bottom: none; }}
     .data-table tr:hover td {{ background: #1a2030; }}
     .num {{ text-align: right; font-variant-numeric: tabular-nums; }}
+    .data-table th.num {{ text-align: right; }}
     .bold {{ font-weight: 600; color: #f1f5f9; }}
     .muted {{ color: #475569; }}
     .center {{ text-align: center; }}
@@ -553,13 +572,13 @@ def build_html(d: dict) -> str:
   <div class="card">
     <div class="section-title">Shadow Events — Would-Be Trade Sizes</div>
     <p class="muted" style="font-size:0.82rem;margin:0 0 12px">
-      Average TP / SL distance as % of entry price for out-of-window signals.
-      These are <em>unresolved</em> — whether TP/SL would have been hit
-      requires retroactive candle backfill.
+      Outcomes resolved against local candle data via resolve_shadows.py.
+      TP/SL dist = avg would-be distance as % of entry price.
     </p>
     <table class="data-table">
       <thead><tr>
-        <th>Strategy</th><th class="num">Count</th>
+        <th>Strategy</th><th class="num">Signals</th>
+        <th class="num">TP</th><th class="num">SL</th><th class="num">TIME</th>
         <th class="num">Avg TP dist</th><th class="num">Avg SL dist</th>
       </tr></thead>
       <tbody>{shadow_rows_html}</tbody>
@@ -595,6 +614,7 @@ def build_html(d: dict) -> str:
         <th>Strategy</th><th class="num">Trades</th>
         <th class="num">TP</th><th class="num">SL</th>
         <th class="num">Time exit</th>
+        <th class="num">Exch closed</th>
         <th class="num">Net PnL (USDT)</th>
         <th class="num">Avg hold</th>
       </tr></thead>

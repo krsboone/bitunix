@@ -1,25 +1,28 @@
 """
-sr_trader.py — Bitunix S/R Breakout perpetual futures trader
+sr_retest_trader.py — Bitunix S/R Breakout trader with retest entry
 
-Strategy: Support/Resistance breakout with state machine
-  WATCHING → ARMED → IN_TRADE
+Strategy: Support/Resistance breakout with retest confirmation
+  WATCHING → ARMED → RETEST → IN_TRADE
 
-  S/R levels:  current session high/low | 4-hour rolling high/low |
-               previous session high/low
+  Same as sr_trader.py but instead of entering immediately on breakout,
+  waits for price to pull back and retest the broken S/R level, then
+  enters on bounce confirmation. Produces better average entry prices.
+
   Arm:         price approaches a level within arm_distance %
-  Enter:       price breaks convincingly through the armed level:
-                 breakout % + volume confirmation + Z-score gate
+  Retest:      price breaks level + Z-score confirm → wait for pullback
+  Enter:       price returns within arm_distance of level + candle body
+               confirms bounce direction
   TP/SL:       1.0σ / 3.0σ × sqrt(hold_intervals) from entry
   Time exit:   close if held > MAX_HOLD_MINS
 
-Per-symbol sweep-optimised parameters (30-day walk-forward + 7-day holdout):
-  BTCUSDT: vol-mult 2.0  breakout 0.10%  arm-distance 0.15%  (holdout score 36.2)
-  ETHUSDT: vol-mult 3.0  breakout 0.15%  arm-distance 0.30%  (holdout score 42.4)
+Per-symbol sweep-optimised parameters (same as sr_trader.py control):
+  BTCUSDT: vol-mult 2.0  breakout 0.10%  arm-distance 0.15%
+  ETHUSDT: vol-mult 3.0  breakout 0.15%  arm-distance 0.30%
 
 Usage:
-    python3 sr_trader.py              # live trading
-    python3 sr_trader.py --debug      # DEBUG mode — no real orders
-    python3 sr_trader.py --symbol BTCUSDT
+    python3 sr_retest_trader.py              # live trading
+    python3 sr_retest_trader.py --debug      # DEBUG mode — no real orders
+    python3 sr_retest_trader.py --symbol BTCUSDT
 """
 
 import argparse
@@ -37,9 +40,9 @@ from market import fetch_ticker, compute_sigma
 from log_cap import start_logging
 import arm_log
 
-start_logging("sr_trader")
+start_logging("sr_retest_trader")
 
-STRATEGY = "sr"
+STRATEGY = "sr_rt"
 
 # ── Per-symbol sweep-optimised config ─────────────────────────────────────────
 
@@ -102,7 +105,7 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-TRADE_CSV = os.path.join("log", "sr_trades.csv")
+TRADE_CSV = os.path.join("log", "sr_rt_trades.csv")
 
 
 # ── Candle helpers ─────────────────────────────────────────────────────────────
@@ -411,6 +414,7 @@ def run(debug: bool, symbols: list[str] = None) -> None:
             "state":            "WATCHING",
             "armed_level":      None,
             "armed_dir":        None,
+            "retest_start":     None,
             # Broken level cooldown: level → timestamp_ms when triggered
             "broken_levels":    {},
             # Open position (None when WATCHING/ARMED)
@@ -520,6 +524,58 @@ def _process_symbol(client: BitunixClient, sym: str, s: dict, cfg: dict,
         _monitor_trade(client, sym, s, c, debug)
         return
 
+    if s["state"] == "RETEST":
+        level     = s["armed_level"]
+        direction = s["armed_dir"]
+        side      = "LONG" if direction == "UP" else "SHORT"
+        dist_pct  = abs(price - level) / level
+
+        retest_age_mins = (now_utc() - s["retest_start"]).total_seconds() / 60
+
+        # Disarm: retest window timed out
+        if retest_age_mins > MAX_HOLD_MINS:
+            log.info(f"  {sym}: RETEST timed out after {retest_age_mins:.1f}min — disarm")
+            arm_log.log_arm_event(s["arm_id"], STRATEGY, sym, s["arm_time"], s["arm_price"],
+                                  side, "NO_FIRE", disarm_price=price,
+                                  no_fire_reason="RETEST_TIMEOUT")
+            s["state"] = "WATCHING"
+            s["armed_level"] = s["armed_dir"] = s["retest_start"] = None
+            s["arm_id"] = s["arm_time"] = s["arm_price"] = None
+            return
+
+        # Disarm: price broke back through level (failed breakout)
+        if direction == "UP" and price < level * (1 - cfg["breakout"]):
+            log.info(f"  {sym}: RETEST — breakout failed (price={price:.4f} back below {level:.4f})")
+            arm_log.log_arm_event(s["arm_id"], STRATEGY, sym, s["arm_time"], s["arm_price"],
+                                  side, "NO_FIRE", disarm_price=price,
+                                  no_fire_reason="RETEST_FAILED")
+            s["state"] = "WATCHING"
+            s["armed_level"] = s["armed_dir"] = s["retest_start"] = None
+            s["arm_id"] = s["arm_time"] = s["arm_price"] = None
+            return
+
+        if direction == "DOWN" and price > level * (1 + cfg["breakout"]):
+            log.info(f"  {sym}: RETEST — breakout failed (price={price:.4f} back above {level:.4f})")
+            arm_log.log_arm_event(s["arm_id"], STRATEGY, sym, s["arm_time"], s["arm_price"],
+                                  side, "NO_FIRE", disarm_price=price,
+                                  no_fire_reason="RETEST_FAILED")
+            s["state"] = "WATCHING"
+            s["armed_level"] = s["armed_dir"] = s["retest_start"] = None
+            s["arm_id"] = s["arm_time"] = s["arm_price"] = None
+            return
+
+        # Enter when price pulls back within arm_distance and bounces
+        if dist_pct <= cfg["arm_distance"]:
+            body_ok = (price > c["open"]) if side == "LONG" else (price < c["open"])
+            if body_ok:
+                log.info(f"  {sym}: RETEST confirmed @ {level:.4f}  dist={dist_pct*100:.3f}%  → {side}")
+                _enter_trade(client, sym, s, cfg, c, side, level, sigma, balance, debug)
+            else:
+                log.info(f"  {sym}: RETEST at level {level:.4f} — awaiting bounce (body not confirmed)")
+        else:
+            log.info(f"  {sym}: RETEST waiting  level={level:.4f}  dist={dist_pct*100:.3f}%  age={retest_age_mins:.1f}min")
+        return
+
     if s["state"] == "ARMED":
         level     = s["armed_level"]
         direction = s["armed_dir"]
@@ -549,17 +605,15 @@ def _process_symbol(client: BitunixClient, sym: str, s: dict, cfg: dict,
 
         vol_ok = vol_avg > 0 and vol_now >= vol_avg * cfg["vol_mult"]
 
-        if broke and z_ok and vol_ok:
-            side = "LONG" if direction == "UP" else "SHORT"
-            log.info(f"  {sym}: BREAKOUT confirmed  "
-                     f"level={level:.4f}  dir={direction}  → {side}")
-            _enter_trade(client, sym, s, cfg, c, side, level,
-                         sigma, balance, debug)
+        if broke and z_ok:
+            # Breakout detected — wait for retest rather than entering immediately
+            log.info(f"  {sym}: BREAKOUT detected  level={level:.4f}  dir={direction}  → awaiting RETEST")
+            s["state"]        = "RETEST"
+            s["retest_start"] = now_utc()
         else:
             reasons = []
-            if not broke:   reasons.append(f"no-break(price={price:.4f} need {level*(1+cfg['breakout'] if direction=='UP' else 1-cfg['breakout']):.4f})")
+            if not broke:   reasons.append(f"no-break(price={price:.4f} need {level*(1+cfg['breakout']) if direction=='UP' else level*(1-cfg['breakout']):.4f})")
             if not z_ok:    reasons.append(f"z={z:+.3f}")
-            if not vol_ok:  reasons.append(f"vol={vol_now:.0f}<{vol_avg*cfg['vol_mult']:.0f}")
             log.info(f"  {sym}: armed @ {level:.4f} — waiting [{', '.join(reasons)}]")
         return
 
@@ -690,6 +744,7 @@ def _enter_trade(client: BitunixClient, sym: str, s: dict, cfg: dict,
     s["broken_levels"][level] = c["time"]
     s["state"]       = "IN_TRADE"
     s["armed_level"] = s["armed_dir"] = None
+    s["retest_start"] = None
     s["arm_id"] = s["arm_time"] = s["arm_price"] = None
     s["position"]    = {
         "position_id": order_id,
@@ -802,7 +857,7 @@ def _monitor_trade(client: BitunixClient, sym: str, s: dict,
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="S/R Breakout perpetual futures trader")
+        description="S/R Breakout trader with retest entry (sr_retest_trader)")
     parser.add_argument("--debug", action="store_true",
                         help="Debug mode — no real orders placed")
     parser.add_argument("--symbol", nargs="+", metavar="SYMBOL",

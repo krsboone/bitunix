@@ -1,32 +1,32 @@
 """
-bb_trader.py — Bitunix Bollinger Band momentum perpetual futures trader
+ema_trend_trader.py — Bitunix EMA crossover trend-following trader
 
-Strategy: BB band-touch momentum (--flip mode from bb_sim.py)
-  - Resample live 1m candles to 5m internally
-  - When 5m candle closes outside a Bollinger Band → enter in that direction
-    (momentum continuation, NOT mean-reversion)
-  - TP:   0.5 × half_band_width beyond the band (tight, high hit-rate target)
-  - SL:   2.0 × half_band_width back inside the band (wide stop, rarely hit)
-  - Band-width squeeze filter: skip entries when bands are expanding rapidly
-  - Directional cooldown: block same-direction re-entry for N 5m candles after SL
-  - Time exit: close if held > MAX_HOLD_MINS
+Strategy: EMA crossover on 15m candles
+  - Resample live 1m candles to 15m internally
+  - When fast EMA crosses above slow EMA on completed 15m candle → LONG
+  - When fast EMA crosses below slow EMA on completed 15m candle → SHORT
+  - SL:   SL_MULT × ATR from entry — exchange-managed safety net
+  - TP:   TP_MULT × ATR from entry — wide backstop (rarely hits via exchange)
+  - Trend exit: close when EMA re-crosses (fast flips relative to slow on 15m close)
+  - Time exit:  close if held > MAX_HOLD_MINS (6h default)
 
-Per-symbol sweep-optimised parameters (30-day walk-forward + 7-day holdout):
-  BTCUSDT: period=30  mult=1.5  (holdout TP 80.1%  SL 5.2%  score 74.9)
-  ETHUSDT: period=20  mult=1.5  (holdout TP 82.3%  SL 5.6%  score 76.7)
-  Shared:  tp_mult=1.0  sl_mult=2.0  squeeze=1.0  cooldown=5
+Runs 24/7 — no trading window restrictions. Trends develop at any hour;
+the longer hold window makes fee drag minor relative to expected move.
+
+Default parameters (sweep candidates):
+  Both symbols: fast_period=9  slow_period=21  atr_period=14
+  Shared:       sl_mult=2.0    tp_mult=5.0     hold=360min
 
 Usage:
-    python3 bb_trader.py              # live trading
-    python3 bb_trader.py --debug      # DEBUG mode — no real orders
-    python3 bb_trader.py --symbol BTCUSDT
+    python3 ema_trend_trader.py              # live trading
+    python3 ema_trend_trader.py --debug      # DEBUG mode — no real orders
+    python3 ema_trend_trader.py --symbol BTCUSDT
 """
 
 import argparse
 import csv
 import json
 import logging
-import math
 import os
 import time
 from datetime import datetime, timezone
@@ -37,53 +37,45 @@ from market import fetch_ticker
 from log_cap import start_logging
 import arm_log
 
-start_logging("bb_trader")
+start_logging("ema_trend_trader")
 
-STRATEGY = "bb"
+STRATEGY = "ema_trend"
 
-# ── Per-symbol sweep-optimised config ─────────────────────────────────────────
+# ── Per-symbol config ──────────────────────────────────────────────────────────
 
 SYMBOL_CONFIGS = {
     "BTCUSDT": {
-        "period":    30,
-        "mult":      1.5,
-        "windows":   [(11, 13)],   # 11:00–13:00 UTC Mon-Fri
-        "skip_days": {5, 6},       # Sat, Sun
+        "fast_period": 9,
+        "slow_period": 21,
     },
     "ETHUSDT": {
-        "period":    20,
-        "mult":      1.5,
-        "windows":   [(9, 11), (14, 17)],  # 09:00–11:00 and 14:00–17:00 UTC Mon-Fri
-        "skip_days": {5, 6},               # Sat, Sun
+        "fast_period": 9,
+        "slow_period": 21,
     },
 }
 SYMBOLS = list(SYMBOL_CONFIGS.keys())
 
 # ── Shared strategy parameters ─────────────────────────────────────────────────
 
-TP_MULT          = 1.0    # TP = tp_mult × half_band_width beyond the band
-SL_MULT          = 2.0    # SL = sl_mult × half_band_width back inside the band
-SQUEEZE_THRESH   = 1.0    # enter only when bw ≤ bw_rolling_avg × threshold
-SQUEEZE_LOOKBACK = 50     # 5m candles for rolling band-width average
-COOLDOWN_5M      = 5      # 5m candles to block same-direction re-entry after SL
-#MAX_HOLD_MINS    = 33
-MAX_HOLD_MINS    = 60
+ATR_PERIOD      = 14
+SL_MULT         = 2.0    # ATR multiples for exchange-managed safety stop
+TP_MULT         = 5.0    # ATR multiples for wide backstop (EMA re-cross is primary exit)
+MAX_HOLD_MINS   = 360    # 6-hour time exit backstop
 
-FIVE_MIN_MS      = 5 * 60 * 1000
-MIN_HISTORY_5M   = max(50, SQUEEZE_LOOKBACK) + 10   # 5m candles before trading
+FIFTEEN_MIN_MS  = 15 * 60 * 1000
 
 # ── Trading parameters ─────────────────────────────────────────────────────────
 
-LEVERAGE         = 2
-MARGIN_COIN      = "USDT"
-INTERVAL         = "1m"
-MAX_TRADE_PCT    = 0.10    # 10% of balance per trade
-POLL_SECS        = 60      # 1-minute candle rhythm
+LEVERAGE        = 2
+MARGIN_COIN     = "USDT"
+INTERVAL        = "1m"
+MAX_TRADE_PCT   = 0.10
+POLL_SECS       = 60
 
-FEE_TAKER        = 0.00060
-FEE_MAKER        = 0.00060
-ROUND_TRIP_FEE   = FEE_TAKER + FEE_MAKER
-MIN_BALANCE_PCT  = 0.70
+FEE_TAKER       = 0.00060
+FEE_MAKER       = 0.00060
+ROUND_TRIP_FEE  = FEE_TAKER + FEE_MAKER
+MIN_BALANCE_PCT = 0.70
 
 PRECISION = {
     "BTCUSDT": {"qty": 4, "price": 1},
@@ -99,7 +91,7 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-TRADE_CSV = os.path.join("log", "bb_trades.csv")
+TRADE_CSV = os.path.join("log", "ema_trend_trades.csv")
 
 
 # ── Candle helpers ─────────────────────────────────────────────────────────────
@@ -119,19 +111,73 @@ def normalize(c: dict) -> dict:
     }
 
 
-def fetch_candles_paged(client: BitunixClient, symbol: str,
-                        pages: int = 2) -> list[dict]:
-    """Fetch pages × 1000 historical 1m candles, sorted ascending."""
+def fetch_latest_candles(client: BitunixClient, symbol: str, n: int = 20) -> list[dict]:
+    resp = client.get("/api/v1/futures/market/kline", {
+        "symbol": symbol, "interval": INTERVAL, "limit": str(n),
+    })
+    if resp.get("code") != 0:
+        raise RuntimeError(f"Kline error: {resp.get('msg')}")
+    return [normalize(c) for c in resp.get("data", [])]
+
+
+def load_candles_csv(symbol: str) -> list[dict]:
+    path = os.path.join("data", f"{symbol}_1m.csv")
+    if not os.path.exists(path):
+        return []
+    candles = []
+    with open(path, "r") as f:
+        for row in csv.DictReader(f):
+            candles.append({
+                "time":   int(row["timestamp_ms"]),
+                "open":   float(row["open"]),
+                "high":   float(row["high"]),
+                "low":    float(row["low"]),
+                "close":  float(row["close"]),
+                "volume": float(row["volume"]),
+            })
+    candles.sort(key=lambda c: c["time"])
+    return candles
+
+
+def fetch_gap_candles(client: BitunixClient, symbol: str, after_ms: int) -> list[dict]:
     now_ms = int(now_utc().timestamp() * 1000)
     end_ms = now_ms
     raw    = []
+    while True:
+        resp = client.get("/api/v1/futures/market/kline", {
+            "symbol": symbol, "interval": INTERVAL,
+            "limit": "1000", "endTime": str(end_ms),
+        })
+        if resp.get("code") != 0:
+            raise RuntimeError(f"Kline error: {resp.get('msg')}")
+        batch = resp.get("data", [])
+        if not batch:
+            break
+        batch = [c for c in batch if int(c["time"]) > after_ms]
+        raw.extend(batch)
+        oldest = min(int(c["time"]) for c in resp["data"])
+        if oldest <= after_ms:
+            break
+        end_ms = oldest - 1
 
+    seen, candles = set(), []
+    for c in raw:
+        ts = int(c["time"])
+        if ts not in seen:
+            seen.add(ts)
+            candles.append(normalize(c))
+    candles.sort(key=lambda c: c["time"])
+    return candles
+
+
+def fetch_candles_paged(client: BitunixClient, symbol: str, pages: int = 4) -> list[dict]:
+    now_ms = int(now_utc().timestamp() * 1000)
+    end_ms = now_ms
+    raw    = []
     for _ in range(pages):
         resp = client.get("/api/v1/futures/market/kline", {
-            "symbol":   symbol,
-            "interval": INTERVAL,
-            "limit":    "1000",
-            "endTime":  str(end_ms),
+            "symbol": symbol, "interval": INTERVAL,
+            "limit": "1000", "endTime": str(end_ms),
         })
         if resp.get("code") != 0:
             raise RuntimeError(f"Kline error: {resp.get('msg')}")
@@ -151,133 +197,73 @@ def fetch_candles_paged(client: BitunixClient, symbol: str,
     return candles
 
 
-def fetch_latest_candles(client: BitunixClient, symbol: str,
-                         n: int = 10) -> list[dict]:
-    resp = client.get("/api/v1/futures/market/kline", {
-        "symbol":   symbol,
-        "interval": INTERVAL,
-        "limit":    str(n),
-    })
-    if resp.get("code") != 0:
-        raise RuntimeError(f"Kline error: {resp.get('msg')}")
-    return [normalize(c) for c in resp.get("data", [])]
+# ── 15m resampling ─────────────────────────────────────────────────────────────
 
-
-def load_candles_csv(symbol: str) -> list[dict]:
-    """Load locally-cached 1m candles from fetch_data.py CSV, sorted ascending."""
-    import csv as _csv
-    path = os.path.join("data", f"{symbol}_1m.csv")
-    if not os.path.exists(path):
-        return []
-    candles = []
-    with open(path, "r") as f:
-        reader = _csv.DictReader(f)
-        for row in reader:
-            candles.append({
-                "time":   int(row["timestamp_ms"]),
-                "open":   float(row["open"]),
-                "high":   float(row["high"]),
-                "low":    float(row["low"]),
-                "close":  float(row["close"]),
-                "volume": float(row["volume"]),
-            })
-    candles.sort(key=lambda c: c["time"])
-    return candles
-
-
-def fetch_gap_candles(client: BitunixClient, symbol: str,
-                      after_ms: int) -> list[dict]:
-    """Fetch all 1m candles from after_ms up to now via paged API calls."""
-    now_ms = int(now_utc().timestamp() * 1000)
-    end_ms = now_ms
-    raw    = []
-
-    while True:
-        resp = client.get("/api/v1/futures/market/kline", {
-            "symbol":    symbol,
-            "interval":  INTERVAL,
-            "limit":     "1000",
-            "endTime":   str(end_ms),
-        })
-        if resp.get("code") != 0:
-            raise RuntimeError(f"Kline error: {resp.get('msg')}")
-        batch = resp.get("data", [])
-        if not batch:
-            break
-        # Keep only candles newer than the CSV
-        batch = [c for c in batch if int(c["time"]) > after_ms]
-        raw.extend(batch)
-        oldest = min(int(c["time"]) for c in resp["data"])
-        if oldest <= after_ms:
-            break
-        end_ms = oldest - 1
-
-    seen, candles = set(), []
-    for c in raw:
-        ts = int(c["time"])
-        if ts not in seen:
-            seen.add(ts)
-            candles.append(normalize(c))
-    candles.sort(key=lambda c: c["time"])
-    return candles
-
-
-# ── 5m resampling ──────────────────────────────────────────────────────────────
-
-def build_5m_buf(candles_1m: list[dict]) -> tuple[list[dict], dict | None, int | None]:
-    """
-    Build a completed 5m candle buffer from 1m history.
-    Returns (buf_5m, current_5m_in_progress, current_bucket).
-    """
-    buf_5m         = []
-    current_5m     = None
+def build_15m_buf(candles_1m: list[dict]) -> tuple[list[dict], dict | None, int | None]:
+    buf_15m        = []
+    current_15m    = None
     current_bucket = None
 
     for c in candles_1m:
-        bucket = (c["time"] // FIVE_MIN_MS) * FIVE_MIN_MS
+        bucket = (c["time"] // FIFTEEN_MIN_MS) * FIFTEEN_MIN_MS
         if current_bucket is None:
             current_bucket = bucket
-            current_5m = _start_5m(c)
+            current_15m    = _start_15m(c)
         elif bucket != current_bucket:
-            buf_5m.append(current_5m)
+            buf_15m.append(current_15m)
             current_bucket = bucket
-            current_5m = _start_5m(c)
+            current_15m    = _start_15m(c)
         else:
-            _update_5m(current_5m, c)
+            _update_15m(current_15m, c)
 
-    return buf_5m, current_5m, current_bucket
+    return buf_15m, current_15m, current_bucket
 
 
-def _start_5m(c: dict) -> dict:
+def _start_15m(c: dict) -> dict:
     return {"time": c["time"], "open": c["open"], "high": c["high"],
             "low": c["low"], "close": c["close"], "volume": c["volume"]}
 
 
-def _update_5m(c5: dict, c: dict) -> None:
-    c5["high"]    = max(c5["high"],  c["high"])
-    c5["low"]     = min(c5["low"],   c["low"])
-    c5["close"]   = c["close"]
-    c5["volume"] += c["volume"]
+def _update_15m(c15: dict, c: dict) -> None:
+    c15["high"]    = max(c15["high"], c["high"])
+    c15["low"]     = min(c15["low"],  c["low"])
+    c15["close"]   = c["close"]
+    c15["volume"] += c["volume"]
 
 
-# ── Bollinger Band computation ─────────────────────────────────────────────────
+# ── EMA and ATR ────────────────────────────────────────────────────────────────
 
-def bollinger(buf_5m: list[dict], period: int, mult: float) -> tuple:
-    """
-    Returns (sma, upper, lower, half_width) from the last `period` candles.
-    Returns (None, None, None, 0) if insufficient data.
-    """
-    if len(buf_5m) < period:
-        return None, None, None, 0.0
-    closes = [c["close"] for c in buf_5m[-period:]]
-    sma    = sum(closes) / period
-    var    = sum((p - sma) ** 2 for p in closes) / (period - 1)
-    hw     = mult * math.sqrt(var)
-    return sma, sma + hw, sma - hw, hw
+def init_emas(buf_15m: list[dict], fast_period: int, slow_period: int) -> tuple[float | None, float | None]:
+    """Seed EMAs from historical 15m buffer. Returns (ema_fast, ema_slow)."""
+    closes = [c["close"] for c in buf_15m]
+    if len(closes) < slow_period + 1:
+        return None, None
+
+    fast_alpha = 2.0 / (fast_period + 1)
+    slow_alpha = 2.0 / (slow_period + 1)
+
+    ema_f = sum(closes[:fast_period]) / fast_period
+    for c in closes[fast_period:]:
+        ema_f = fast_alpha * c + (1 - fast_alpha) * ema_f
+
+    ema_s = sum(closes[:slow_period]) / slow_period
+    for c in closes[slow_period:]:
+        ema_s = slow_alpha * c + (1 - slow_alpha) * ema_s
+
+    return ema_f, ema_s
 
 
-def band_width(sma: float, hw: float) -> float:
-    return 2 * hw / sma if sma > 0 else 0.0
+def compute_atr(buf_15m: list[dict], period: int = ATR_PERIOD) -> float | None:
+    if len(buf_15m) < period + 1:
+        return None
+    recent = buf_15m[-(period + 1):]
+    trs = [
+        max(recent[i]["high"] - recent[i]["low"],
+            abs(recent[i]["high"] - recent[i - 1]["close"]),
+            abs(recent[i]["low"]  - recent[i - 1]["close"]))
+        for i in range(1, len(recent))
+    ]
+    return sum(trs) / len(trs)
 
 
 # ── API helpers ────────────────────────────────────────────────────────────────
@@ -321,7 +307,6 @@ def set_leverage(client: BitunixClient, symbol: str, debug: bool) -> None:
 
 
 def log_trade(body: dict) -> None:
-    """Append entry in backtest.py-compatible key-value format."""
     os.makedirs("log", exist_ok=True)
     ts       = now_utc().strftime("%Y-%m-%d %H:%M:%S")
     buy_sell = "BUY" if body.get("side") == "LONG" else "SELL"
@@ -390,48 +375,44 @@ def close_position(client: BitunixClient, position_id: str,
 
 def _process_symbol(client: BitunixClient, sym: str, s: dict,
                     balance: float, debug: bool) -> None:
-    """Fetch new 1m candles, update 5m state, run signal/trade logic."""
-    cfg = SYMBOL_CONFIGS.get(sym, {"period": 20, "mult": 1.5})
+    cfg        = SYMBOL_CONFIGS[sym]
+    fast_alpha = 2.0 / (cfg["fast_period"] + 1)
+    slow_alpha = 2.0 / (cfg["slow_period"] + 1)
+    min_buf    = cfg["slow_period"] + 10
 
     # ── 1. Fetch new 1m candles ────────────────────────────────────────────────
-    recent = fetch_latest_candles(client, sym, n=10)
+    recent = fetch_latest_candles(client, sym, n=20)
     new    = [c for c in recent if c["time"] > s["last_ts"]]
     new.sort(key=lambda c: c["time"])
 
     if not new:
         log.info(f"  {sym}: no new candle yet")
-        _log_state(sym, s)
         return
 
-    # ── 2. Append to 1m buffer and update 5m state ────────────────────────────
-    completed_5m = None
+    # ── 2. Update 15m buffer ───────────────────────────────────────────────────
+    completed_15m = None
     for c1 in new:
-        bucket = (c1["time"] // FIVE_MIN_MS) * FIVE_MIN_MS
-
+        bucket = (c1["time"] // FIFTEEN_MIN_MS) * FIFTEEN_MIN_MS
         if s["current_bucket"] is None:
             s["current_bucket"] = bucket
-            s["current_5m"]     = _start_5m(c1)
+            s["current_15m"]    = _start_15m(c1)
         elif bucket != s["current_bucket"]:
-            # Previous 5m candle just completed
-            completed_5m = s["current_5m"]
-            s["buf_5m"].append(completed_5m)
-            if len(s["buf_5m"]) > 500:
-                s["buf_5m"] = s["buf_5m"][-500:]
+            completed_15m = s["current_15m"]
+            s["buf_15m"].append(completed_15m)
+            if len(s["buf_15m"]) > 300:
+                s["buf_15m"] = s["buf_15m"][-300:]
             s["current_bucket"] = bucket
-            s["current_5m"]     = _start_5m(c1)
-            # Decrement directional cooldowns
-            if s["long_blocked"]  > 0: s["long_blocked"]  -= 1
-            if s["short_blocked"] > 0: s["short_blocked"] -= 1
+            s["current_15m"]    = _start_15m(c1)
         else:
-            _update_5m(s["current_5m"], c1)
-
+            _update_15m(s["current_15m"], c1)
         s["last_ts"] = c1["time"]
 
     last_1m = new[-1]
 
-    # ── 3. IN_TRADE: monitor on latest 1m candle ──────────────────────────────
+    # ── 3. IN_TRADE: monitor on 1m tick + EMA re-cross on 15m close ───────────
     if s["state"] == "IN_TRADE":
-        _monitor_trade(client, sym, s, last_1m, debug)
+        _monitor_trade(client, sym, s, last_1m, completed_15m,
+                       fast_alpha, slow_alpha, debug)
         return
 
     # ── 4. ENTRY_PENDING: enter at open of next 1m candle ─────────────────────
@@ -439,131 +420,84 @@ def _process_symbol(client: BitunixClient, sym: str, s: dict,
         _enter_pending(client, sym, s, last_1m, balance, debug)
         return
 
-    # ── 5. WATCHING: check for BB signal on newly completed 5m candle ─────────
-    if completed_5m is None or len(s["buf_5m"]) < MIN_HISTORY_5M:
-        log.info(f"  {sym}: warming up ({len(s['buf_5m'])}/{MIN_HISTORY_5M} 5m candles)")
+    # ── 5. WATCHING: check for EMA crossover on newly completed 15m candle ────
+    if completed_15m is None:
+        log.info(f"  {sym}: waiting for 15m close  buf={len(s['buf_15m'])}")
         return
 
-    # Compute BB signal first (before window check — needed for shadow events)
-    sma, upper, lower, hw = bollinger(s["buf_5m"], cfg["period"], cfg["mult"])
-    if sma is None:
+    if len(s["buf_15m"]) < min_buf or s["ema_fast"] is None:
+        log.info(f"  {sym}: warming up ({len(s['buf_15m'])}/{min_buf} 15m candles)")
+        # Try to init EMAs if we now have enough history
+        if len(s["buf_15m"]) >= min_buf and s["ema_fast"] is None:
+            s["ema_fast"], s["ema_slow"] = init_emas(
+                s["buf_15m"], cfg["fast_period"], cfg["slow_period"])
         return
 
-    bw = band_width(sma, hw)
-    s["bw_history"].append(bw)
-    if len(s["bw_history"]) > SQUEEZE_LOOKBACK:
-        s["bw_history"] = s["bw_history"][-SQUEEZE_LOOKBACK:]
+    # Update EMA on newly completed candle
+    close      = completed_15m["close"]
+    prev_fast  = s["ema_fast"]
+    prev_slow  = s["ema_slow"]
+    s["ema_fast"] = fast_alpha * close + (1 - fast_alpha) * prev_fast
+    s["ema_slow"] = slow_alpha * close + (1 - slow_alpha) * prev_slow
 
-    bw_avg     = sum(s["bw_history"]) / len(s["bw_history"])
-    squeeze_ok = bw <= bw_avg * SQUEEZE_THRESH
-    price      = completed_5m["close"]
+    atr     = compute_atr(s["buf_15m"])
+    atr_str = f"{atr:.4f}" if atr is not None else "n/a"
 
-    # Detect signal (direction or None)
+    # Detect crossover
     signal_side = None
-    if price > upper and squeeze_ok and s["long_blocked"] == 0:
+    if prev_fast <= prev_slow and s["ema_fast"] > s["ema_slow"]:
         signal_side = "LONG"
-    elif price < lower and squeeze_ok and s["short_blocked"] == 0:
+    elif prev_fast >= prev_slow and s["ema_fast"] < s["ema_slow"]:
         signal_side = "SHORT"
 
-    # Time-of-day and day-of-week filter (only blocks new entries, not open trades)
-    candle_dt   = datetime.fromtimestamp(completed_5m["time"] / 1000, tz=timezone.utc)
-    candle_hour = candle_dt.hour
-    candle_dow  = candle_dt.weekday()
-    windows     = cfg.get("windows")
-    in_window   = True
-    if windows:
-        in_window = False
-        for sh, eh in windows:
-            if sh <= eh:
-                if sh <= candle_hour < eh:
-                    in_window = True; break
-            else:
-                if candle_hour >= sh or candle_hour < eh:
-                    in_window = True; break
-    skip_day = candle_dow in cfg.get("skip_days", set())
+    log.info(
+        f"  {sym}  15m_close={close:.4f}  "
+        f"ema_fast={s['ema_fast']:.4f}  ema_slow={s['ema_slow']:.4f}  "
+        f"atr={atr_str}"
+        + (f"  ← CROSS {signal_side}" if signal_side else "")
+    )
 
-    if not in_window or skip_day:
-        # Log shadow event if a signal would have fired in this out-of-window candle
-        if signal_side:
-            if signal_side == "LONG":
-                wtp = price + hw * TP_MULT
-                wsl = price - hw * SL_MULT
-            else:
-                wtp = price - hw * TP_MULT
-                wsl = price + hw * SL_MULT
-            arm_log.log_arm_event(
-                arm_log.new_arm_id(), STRATEGY, sym,
-                now_utc().strftime("%Y-%m-%d %H:%M:%S"), price, signal_side,
-                "PENDING", shadow=True, atr=hw, would_be_tp=wtp, would_be_sl=wsl,
-            )
-            log.info(f"  {sym}: shadow {signal_side} signal "
-                     f"({candle_dt.strftime('%a %H:%M')} UTC outside window)")
-        if not in_window:
-            log.info(f"  {sym}: outside trade window ({candle_dt.strftime('%a %H:%M')} UTC) — skip")
-        else:
-            log.info(f"  {sym}: skip day ({candle_dt.strftime('%a')} UTC) — skip")
+    if signal_side is None or atr is None:
         return
 
-    log.info(f"  {sym}  5m_close={price:.4f}  sma={sma:.4f}  "
-             f"upper={upper:.4f}  lower={lower:.4f}  "
-             f"bw={bw*100:.3f}%  squeeze={'OK' if squeeze_ok else 'SKIP'}  "
-             f"state={s['state']}")
+    s["pending_side"] = signal_side
+    s["pending_atr"]  = atr
+    s["state"]        = "ENTRY_PENDING"
+    s["arm_id"]       = arm_log.new_arm_id()
+    s["arm_time"]     = now_utc().strftime("%Y-%m-%d %H:%M:%S")
+    s["arm_price"]    = close
 
     if signal_side == "LONG":
-        s["pending_side"] = "LONG"
-        s["pending_hw"]   = hw
-        s["state"]        = "ENTRY_PENDING"
-        s["arm_id"]       = arm_log.new_arm_id()
-        s["arm_time"]     = now_utc().strftime("%Y-%m-%d %H:%M:%S")
-        s["arm_price"]    = price
-        log.info(f"  {sym}: LONG signal  upper={upper:.4f}  hw={hw:.4f}")
-
-    elif signal_side == "SHORT":
-        s["pending_side"] = "SHORT"
-        s["pending_hw"]   = hw
-        s["state"]        = "ENTRY_PENDING"
-        s["arm_id"]       = arm_log.new_arm_id()
-        s["arm_time"]     = now_utc().strftime("%Y-%m-%d %H:%M:%S")
-        s["arm_price"]    = price
-        log.info(f"  {sym}: SHORT signal  lower={lower:.4f}  hw={hw:.4f}")
-
+        wtp, wsl = close + atr * TP_MULT, close - atr * SL_MULT
     else:
-        blocked = []
-        if s["long_blocked"]:  blocked.append(f"LONG blocked({s['long_blocked']})")
-        if s["short_blocked"]: blocked.append(f"SHORT blocked({s['short_blocked']})")
-        if not squeeze_ok:     blocked.append("squeeze")
-        log.info(f"  {sym}: no signal" + (f"  [{', '.join(blocked)}]" if blocked else ""))
+        wtp, wsl = close - atr * TP_MULT, close + atr * SL_MULT
+    log.info(f"  {sym}: EMA CROSS {signal_side}  wtp≈{wtp:.4f}  wsl≈{wsl:.4f}")
 
 
 def _enter_pending(client: BitunixClient, sym: str, s: dict,
                    c1: dict, balance: float, debug: bool) -> None:
-    """Execute the pending entry at the open of this 1m candle."""
     side = s["pending_side"]
-    hw   = s["pending_hw"]
+    atr  = s["pending_atr"]
 
-    # Use live ticker for a tighter entry price estimate
     ticker      = fetch_ticker(client, sym)
     entry_price = float(ticker.get("lastPrice", c1["open"]))
 
-    # Anchor TP/SL to actual entry price (not stale band levels from signal candle)
     if side == "LONG":
-        tp_price = entry_price + hw * TP_MULT
-        sl_price = entry_price - hw * SL_MULT
+        tp_price = entry_price + atr * TP_MULT
+        sl_price = entry_price - atr * SL_MULT
     else:
-        tp_price = entry_price - hw * TP_MULT
-        sl_price = entry_price + hw * SL_MULT
+        tp_price = entry_price - atr * TP_MULT
+        sl_price = entry_price + atr * SL_MULT
 
-    # Fee gate: skip if the TP distance doesn't cover round-trip fees
+    # Fee gate
     tp_dist  = abs(tp_price - entry_price)
     fee_cost = entry_price * ROUND_TRIP_FEE
     if tp_dist <= fee_cost:
         log.info(f"  {sym}: SKIP entry — TP dist {tp_dist:.4f} ≤ fee {fee_cost:.4f}")
         arm_log.log_arm_event(s["arm_id"], STRATEGY, sym, s["arm_time"], s["arm_price"],
                               side, "NO_FIRE", disarm_price=entry_price,
-                              no_fire_reason="FEE_GATE", atr=s["pending_hw"])
-        s["state"]        = "WATCHING"
-        s["pending_side"] = s["pending_hw"] = None
-        s["arm_id"] = s["arm_time"] = s["arm_price"] = None
+                              no_fire_reason="FEE_GATE", atr=atr)
+        _clear_pending(s)
         return
 
     notional = balance * MAX_TRADE_PCT * LEVERAGE
@@ -573,27 +507,23 @@ def _enter_pending(client: BitunixClient, sym: str, s: dict,
         log.info(f"  {sym}: qty {qty} < min {min_qty}, skip")
         arm_log.log_arm_event(s["arm_id"], STRATEGY, sym, s["arm_time"], s["arm_price"],
                               side, "NO_FIRE", disarm_price=entry_price,
-                              no_fire_reason="MIN_QTY", atr=s["pending_hw"])
-        s["state"]        = "WATCHING"
-        s["pending_side"] = s["pending_hw"] = None
-        s["arm_id"] = s["arm_time"] = s["arm_price"] = None
+                              no_fire_reason="MIN_QTY", atr=atr)
+        _clear_pending(s)
         return
 
     log.info(f"  {sym}: ENTER {side}  entry≈{entry_price:.4f}  "
-             f"tp={tp_price:.4f}  sl={sl_price:.4f}  qty={qty}")
+             f"tp={tp_price:.4f} (backstop)  sl={sl_price:.4f}  qty={qty}")
 
     order_id = place_order(client, sym, side, qty, tp_price, sl_price, debug)
     if order_id is None:
         arm_log.log_arm_event(s["arm_id"], STRATEGY, sym, s["arm_time"], s["arm_price"],
                               side, "NO_FIRE", disarm_price=entry_price,
-                              no_fire_reason="ORDER_FAILED", atr=s["pending_hw"])
-        s["state"]        = "WATCHING"
-        s["pending_side"] = s["pending_hw"] = None
-        s["arm_id"] = s["arm_time"] = s["arm_price"] = None
+                              no_fire_reason="ORDER_FAILED", atr=atr)
+        _clear_pending(s)
         return
 
     arm_log.log_arm_event(s["arm_id"], STRATEGY, sym, s["arm_time"], s["arm_price"],
-                          side, "FIRED", disarm_price=entry_price, atr=s["pending_hw"])
+                          side, "FIRED", disarm_price=entry_price, atr=atr)
     log_trade({
         "symbol":       sym,
         "side":         side,
@@ -618,18 +548,30 @@ def _enter_pending(client: BitunixClient, sym: str, s: dict,
         "debug":       debug,
         "arm_id":      s["arm_id"],
     }
-    s["pending_side"] = s["pending_hw"] = None
-    s["arm_id"] = s["arm_time"] = s["arm_price"] = None
+    _clear_pending(s)
 
 
 def _monitor_trade(client: BitunixClient, sym: str, s: dict,
-                   c1: dict, debug: bool) -> None:
-    """Check if the open position has resolved; handle time exit."""
+                   c1: dict, completed_15m: dict | None,
+                   fast_alpha: float, slow_alpha: float, debug: bool) -> None:
     pos       = s["position"]
     held_mins = (now_utc() - pos["opened_at"]).total_seconds() / 60
     side      = pos["side"]
     tp        = pos["tp_price"]
     sl        = pos["sl_price"]
+
+    # Update EMAs and check for reversal on each completed 15m candle
+    ema_reversed = False
+    if completed_15m is not None:
+        close         = completed_15m["close"]
+        s["ema_fast"] = fast_alpha * close + (1 - fast_alpha) * s["ema_fast"]
+        s["ema_slow"] = slow_alpha * close + (1 - slow_alpha) * s["ema_slow"]
+        if side == "LONG"  and s["ema_fast"] < s["ema_slow"]:
+            ema_reversed = True
+        elif side == "SHORT" and s["ema_fast"] > s["ema_slow"]:
+            ema_reversed = True
+        if ema_reversed:
+            log.info(f"  {sym}: EMA reversal — fast={s['ema_fast']:.4f}  slow={s['ema_slow']:.4f}")
 
     if debug:
         price  = c1["close"]
@@ -639,9 +581,12 @@ def _monitor_trade(client: BitunixClient, sym: str, s: dict,
         if side == "SHORT":
             pnl = -pnl
 
-        log.info(f"  {sym} [DEBUG {side}]  entry={pos['entry_price']:.4f}  "
-                 f"now={price:.4f}  uPnL≈{pnl:+.4f}  held={held_mins:.1f}min  "
-                 f"tp={tp:.4f}  sl={sl:.4f}")
+        log.info(
+            f"  {sym} [DEBUG {side}]  entry={pos['entry_price']:.4f}  "
+            f"now={price:.4f}  uPnL≈{pnl:+.4f}  held={held_mins:.1f}min  "
+            f"ema_fast={s['ema_fast']:.4f}  ema_slow={s['ema_slow']:.4f}"
+            + ("  ← EMA REVERSED" if ema_reversed else "")
+        )
 
         if tp_hit and sl_hit:
             outcome = "TP" if abs(tp - pos["entry_price"]) <= abs(sl - pos["entry_price"]) else "SL"
@@ -649,6 +594,8 @@ def _monitor_trade(client: BitunixClient, sym: str, s: dict,
             outcome = "TP"
         elif sl_hit:
             outcome = "SL"
+        elif ema_reversed:
+            outcome = "EMA_EXIT"
         elif held_mins >= MAX_HOLD_MINS:
             outcome = "TIME"
         else:
@@ -656,25 +603,21 @@ def _monitor_trade(client: BitunixClient, sym: str, s: dict,
 
         if outcome:
             exit_price = tp if outcome == "TP" else (sl if outcome == "SL" else price)
-            log.info(f"  {sym} [DEBUG]: {outcome} exit @ {exit_price:.4f}  held={held_mins:.1f}min")
+            log.info(f"  {sym} [DEBUG]: {outcome} @ {exit_price:.4f}  held={held_mins:.1f}min")
             arm_log.log_close_event(
-                pos.get("arm_id", ""), STRATEGY, sym, side,
-                outcome, exit_price, held_mins,
+                pos.get("arm_id", ""), STRATEGY, sym, side, outcome,
+                exit_price, held_mins,
                 arm_log.calc_pnl(side, pos["entry_price"], exit_price, pos["qty"], ROUND_TRIP_FEE),
             )
-            if outcome == "SL":
-                if side == "LONG":  s["long_blocked"]  = COOLDOWN_5M
-                else:               s["short_blocked"] = COOLDOWN_5M
             s["state"]    = "WATCHING"
             s["position"] = None
         return
 
-    # Live: check exchange (TP/SL are inline on the order)
+    # Live: check if exchange already closed (TP/SL hit inline)
     live = [p for p in get_open_positions(client, sym)
             if p.get("positionId") == pos["position_id"]]
 
     if not live:
-        # Infer outcome from latest candle price vs. TP/SL levels
         cur_price = c1["close"]
         tp_px, sl_px = pos.get("tp_price"), pos.get("sl_price")
         if tp_px is not None and sl_px is not None:
@@ -687,8 +630,8 @@ def _monitor_trade(client: BitunixClient, sym: str, s: dict,
             outcome_str, exit_px = "EXCHANGE_CLOSED", cur_price
         log.info(f"  {sym}: position closed by exchange ({outcome_str})")
         arm_log.log_close_event(
-            pos.get("arm_id", ""), STRATEGY, sym, side,
-            outcome_str, exit_px, held_mins,
+            pos.get("arm_id", ""), STRATEGY, sym, side, outcome_str,
+            exit_px, held_mins,
             arm_log.calc_pnl(side, pos["entry_price"], exit_px, pos["qty"], ROUND_TRIP_FEE),
         )
         s["state"]    = "WATCHING"
@@ -697,27 +640,38 @@ def _monitor_trade(client: BitunixClient, sym: str, s: dict,
 
     p    = live[0]
     upnl = float(p.get("unrealizedPNL", 0))
-    log.info(f"  {sym} [{side}]  entry={pos['entry_price']:.4f}  "
-             f"uPnL={upnl:+.4f}  held={held_mins:.1f}min  "
-             f"tp={tp:.4f}  sl={sl:.4f}")
+    log.info(
+        f"  {sym} [{side}]  entry={pos['entry_price']:.4f}  "
+        f"uPnL={upnl:+.4f}  held={held_mins:.1f}min  "
+        f"ema_fast={s['ema_fast']:.4f}  ema_slow={s['ema_slow']:.4f}"
+        + ("  ← EMA REVERSED" if ema_reversed else "")
+    )
 
-    if held_mins >= MAX_HOLD_MINS:
-        log.info(f"  {sym}: time exit after {held_mins:.1f}min")
+    exit_reason = None
+    if ema_reversed:
+        exit_reason = "EMA_EXIT"
+    elif held_mins >= MAX_HOLD_MINS:
+        exit_reason = "TIME"
+
+    if exit_reason:
+        log.info(f"  {sym}: {exit_reason} after {held_mins:.1f}min")
         if close_position(client, pos["position_id"], sym, debug):
             arm_log.log_close_event(
-                pos.get("arm_id", ""), STRATEGY, sym, side,
-                "TIME", c1["close"], held_mins,
+                pos.get("arm_id", ""), STRATEGY, sym, side, exit_reason,
+                c1["close"], held_mins,
                 arm_log.calc_pnl(side, pos["entry_price"], c1["close"], pos["qty"], ROUND_TRIP_FEE),
             )
             s["state"]    = "WATCHING"
             s["position"] = None
 
 
-def _log_state(sym: str, s: dict) -> None:
-    log.info(f"  {sym}  state={s['state']}  "
-             f"5m_buf={len(s['buf_5m'])}  "
-             f"long_blocked={s['long_blocked']}  "
-             f"short_blocked={s['short_blocked']}")
+def _clear_pending(s: dict) -> None:
+    s["state"]        = "WATCHING"
+    s["pending_side"] = None
+    s["pending_atr"]  = None
+    s["arm_id"]       = None
+    s["arm_time"]     = None
+    s["arm_price"]    = None
 
 
 # ── Main loop ──────────────────────────────────────────────────────────────────
@@ -727,29 +681,19 @@ def run(debug: bool, symbols: list[str] = None) -> None:
     active = symbols or SYMBOLS
 
     log.info("━" * 60)
-    log.info("  BB Momentum Trader")
-    log.info(f"  Symbols   : {', '.join(active)}")
-    log.info(f"  TP/SL     : {TP_MULT}/{SL_MULT}× half-band-width")
-    log.info(f"  Squeeze   : threshold={SQUEEZE_THRESH}  lookback={SQUEEZE_LOOKBACK}")
-    log.info(f"  Cooldown  : {COOLDOWN_5M} 5m-candles after SL")
-    log.info(f"  Hold      : ≤{MAX_HOLD_MINS}min  |  Leverage: {LEVERAGE}×")
-    log.info(f"  Max trade : {MAX_TRADE_PCT:.0%}  |  Fees: {ROUND_TRIP_FEE*100:.3f}%")
-    if debug:
-        log.info("  MODE      : DEBUG — no real orders")
-    log.info("━" * 60)
-
-    _day_names = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
+    log.info("  EMA Trend Trader")
+    log.info(f"  Symbols     : {', '.join(active)}")
+    log.info(f"  Windows     : 24/7 (no time restriction)")
     for sym in active:
-        cfg     = SYMBOL_CONFIGS.get(sym, {})
-        windows = cfg.get("windows")
-        if windows:
-            hrs = "  ".join(f"{sh:02d}:00–{eh:02d}:00" for sh, eh in windows) + " UTC"
-        else:
-            hrs = "all hours"
-        skip = cfg.get("skip_days", set())
-        days = ", ".join(_day_names[d] for d in sorted(skip)) if skip else "all days"
-        log.info(f"  {sym}  period={cfg.get('period')}  mult={cfg.get('mult')}×  "
-                 f"hours={hrs}  skip={days}")
+        cfg = SYMBOL_CONFIGS[sym]
+        log.info(f"  {sym}  fast={cfg['fast_period']}  slow={cfg['slow_period']}")
+    log.info(f"  ATR period  : {ATR_PERIOD}")
+    log.info(f"  SL/TP       : {SL_MULT}/{TP_MULT}× ATR  (primary exit: EMA re-cross)")
+    log.info(f"  Hold        : ≤{MAX_HOLD_MINS}min ({MAX_HOLD_MINS // 60}h)  |  Leverage: {LEVERAGE}×")
+    log.info(f"  Max trade   : {MAX_TRADE_PCT:.0%}  |  Fees: {ROUND_TRIP_FEE * 100:.3f}%")
+    if debug:
+        log.info("  MODE        : DEBUG — no real orders")
+    log.info("━" * 60)
 
     for sym in active:
         set_leverage(client, sym, debug)
@@ -761,59 +705,49 @@ def run(debug: bool, symbols: list[str] = None) -> None:
     # ── Initialise per-symbol state ────────────────────────────────────────────
     sym_state: dict[str, dict] = {}
     for sym in active:
-        cfg = SYMBOL_CONFIGS.get(sym, {"period": 20, "mult": 1.5})
+        cfg = SYMBOL_CONFIGS[sym]
 
-        # 1. Load full local CSV history for accurate bw_avg calibration
         csv_candles = load_candles_csv(sym)
         if csv_candles:
             log.info(f"  {sym}: {len(csv_candles):,} candles from local CSV  "
                      f"({datetime.fromtimestamp(csv_candles[0]['time']/1000, tz=timezone.utc).strftime('%Y-%m-%d')} "
                      f"→ {datetime.fromtimestamp(csv_candles[-1]['time']/1000, tz=timezone.utc).strftime('%Y-%m-%d')})")
-            # 2. Gap-fill from CSV end to now via API
             log.info(f"  {sym}: fetching gap candles from API...")
             gap_candles = fetch_gap_candles(client, sym, csv_candles[-1]["time"])
             log.info(f"  {sym}: {len(gap_candles)} gap candles fetched")
             candles_1m = csv_candles + gap_candles
         else:
-            # No local CSV — fall back to API pages
-            log.info(f"  {sym}: no local CSV found, fetching from API...")
-            candles_1m = fetch_candles_paged(client, sym, pages=2)
-            log.info(f"  {sym}: {len(candles_1m)} candles fetched from API")
+            log.info(f"  {sym}: no local CSV, fetching from API...")
+            candles_1m = fetch_candles_paged(client, sym, pages=4)
+            log.info(f"  {sym}: {len(candles_1m)} candles from API")
 
-        # 3. Build 5m buffer and bw_history from full dataset
-        buf_5m, current_5m, current_bucket = build_5m_buf(candles_1m)
+        buf_15m, current_15m, current_bucket = build_15m_buf(candles_1m)
+        ema_fast, ema_slow = init_emas(buf_15m, cfg["fast_period"], cfg["slow_period"])
 
-        bw_history = []
-        for i in range(cfg["period"], len(buf_5m)):
-            sma, _, _, hw = bollinger(buf_5m[:i+1], cfg["period"], cfg["mult"])
-            if sma:
-                bw_history.append(band_width(sma, hw))
-        bw_history = bw_history[-SQUEEZE_LOOKBACK:]
-
-        # 4. Trim buf_5m for memory — keep enough for BB calculation
-        buf_5m = buf_5m[-(max(cfg["period"], SQUEEZE_LOOKBACK) + 50):]
+        if ema_fast is None:
+            log.warning(f"  {sym}: insufficient 15m history — "
+                        f"need {cfg['slow_period'] + 1}, have {len(buf_15m)}")
+        else:
+            log.info(f"  {sym}: {len(buf_15m)} 15m candles  "
+                     f"ema_fast={ema_fast:.4f}  ema_slow={ema_slow:.4f}  — ready")
 
         sym_state[sym] = {
-            "buf_5m":         buf_5m,
-            "bw_history":     bw_history,
-            "current_5m":     current_5m,
+            "buf_15m":        buf_15m[-(cfg["slow_period"] + 50):],
+            "current_15m":    current_15m,
             "current_bucket": current_bucket,
             "last_ts":        candles_1m[-1]["time"] if candles_1m else 0,
+            "ema_fast":       ema_fast,
+            "ema_slow":       ema_slow,
             # State machine
             "state":          "WATCHING",
             "pending_side":   None,
-            "pending_hw":     None,
+            "pending_atr":    None,
             "position":       None,
-            # Directional cooldowns (in 5m candle counts)
-            "long_blocked":   0,
-            "short_blocked":  0,
             # Arm event tracking
             "arm_id":         None,
             "arm_time":       None,
             "arm_price":      None,
         }
-        log.info(f"  {sym}: {len(buf_5m)} 5m candles in buf  "
-                 f"bw_history={len(bw_history)} entries — ready")
 
     # ── Hydrate open positions from exchange ───────────────────────────────────
     if not debug:
@@ -839,41 +773,35 @@ def run(debug: bool, symbols: list[str] = None) -> None:
 
     # ── Main cycle ─────────────────────────────────────────────────────────────
     while True:
+        cycle_start = now_utc()
         try:
-            cycle_start = now_utc()
-            balance     = get_balance(client)
+            balance = get_balance(client)
             log.info(f"  Balance: {balance:.4f}  |  {cycle_start.strftime('%H:%M:%S')} UTC")
 
             if balance < min_balance:
-                log.warning(f"  CIRCUIT BREAKER: {balance:.4f} < floor "
-                            f"{min_balance:.4f} — halting")
+                log.warning(f"  CIRCUIT BREAKER: {balance:.4f} < floor {min_balance:.4f} — halting")
                 break
 
             for sym in active:
                 try:
                     _process_symbol(client, sym, sym_state[sym], balance, debug)
                 except Exception as e:
-                    log.error(f"  {sym} error: {e}")
+                    log.error(f"  {sym}: error — {e}")
 
         except Exception as e:
             log.error(f"  Cycle error: {e}")
 
         elapsed = (now_utc() - cycle_start).total_seconds()
-        time.sleep(max(5, POLL_SECS - elapsed))
+        sleep_s = max(0, POLL_SECS - elapsed)
+        log.info(f"  Sleeping {sleep_s:.0f}s")
+        time.sleep(sleep_s)
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Bollinger Band momentum perpetual futures trader")
-    parser.add_argument("--debug", action="store_true",
-                        help="Debug mode — no real orders placed")
-    parser.add_argument("--symbol", nargs="+", metavar="SYMBOL",
-                        help=f"Symbol(s) to trade (default: {', '.join(SYMBOLS)})")
-    args = parser.parse_args()
-    run(debug=args.debug, symbols=args.symbol)
-
-
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="EMA Trend Trader")
+    parser.add_argument("--debug",  action="store_true", help="DEBUG mode — no real orders")
+    parser.add_argument("--symbol", help="Single symbol (default: both)")
+    args = parser.parse_args()
+    run(args.debug, [args.symbol] if args.symbol else None)

@@ -48,7 +48,8 @@ STRATEGY = "vol_spike"
 
 SYMBOLS      = ["BTCUSDT", "ETHUSDT"]
 
-SPIKE_MULT   = 2.0     # volume must be ≥ spike_mult × rolling avg to signal
+#SPIKE_MULT   = 2.0     # volume must be ≥ spike_mult × rolling avg to signal
+SPIKE_MULT   = 5.0     # volume must be ≥ spike_mult × rolling avg to signal
 VOL_LOOKBACK = 20      # candles for rolling volume average
 ATR_PERIOD   = 14      # candles for ATR calculation
 TP_MULT      = 2.5     # TP = entry ± atr × tp_mult
@@ -550,9 +551,9 @@ def _monitor_trade(client: BitunixClient, sym: str, s: dict,
             s["position"] = None
         return
 
-    # Live: check exchange
-    live = [p for p in get_open_positions(client, sym)
-            if p.get("positionId") == pos["position_id"]]
+    # Live: check exchange.
+    # Match by symbol only — orderId from place_order != positionId from get_open_positions.
+    live = get_open_positions(client, sym)
 
     if not live:
         log.info(f"  {sym}: position closed by exchange (TP/SL hit)")
@@ -580,6 +581,10 @@ def _monitor_trade(client: BitunixClient, sym: str, s: dict,
         return
 
     p    = live[0]
+    # Sync the real positionId so time-exit close_position calls work correctly.
+    if p.get("positionId") and p["positionId"] != pos["position_id"]:
+        log.info(f"  {sym}: syncing positionId {pos['position_id']} → {p['positionId']}")
+        pos["position_id"] = p["positionId"]
     upnl = float(p.get("unrealizedPNL", 0))
     log.info(f"  {sym} [{side}]  entry={pos['entry_price']:.4f}  "
              f"uPnL={upnl:+.4f}  held={held_mins:.1f}min  "
