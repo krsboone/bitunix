@@ -61,6 +61,8 @@ ATR_PERIOD      = 14
 SL_MULT         = 2.0    # ATR multiples for exchange-managed safety stop
 TP_MULT         = 5.0    # ATR multiples for wide backstop (EMA re-cross is primary exit)
 MAX_HOLD_MINS   = 360    # 6-hour time exit backstop
+BREAKEVEN_ATR   = 1.0    # profit must reach 1× ATR to activate breakeven stop (sweep candidate)
+LOCK_ATR        = 0.25   # new SL locks in 0.25× ATR above entry (sweep candidate)
 
 FIFTEEN_MIN_MS  = 15 * 60 * 1000
 
@@ -371,6 +373,58 @@ def close_position(client: BitunixClient, position_id: str,
     return True
 
 
+def update_sl(client: BitunixClient, symbol: str,
+              position_id: str, new_sl: float) -> bool:
+    """Update the exchange-managed SL for an open position."""
+    resp = client.post("/api/v1/futures/tpsl/position/modify_order", {
+        "symbol":     symbol,
+        "positionId": position_id,
+        "slPrice":    str(new_sl),
+        "slStopType": "MARK_PRICE",
+    })
+    if resp.get("code") != 0:
+        log.error(f"  SL update failed: {resp.get('msg')}")
+        return False
+    return True
+
+
+def _check_breakeven(client: BitunixClient, sym: str, pos: dict,
+                     price: float, debug: bool) -> None:
+    """Move SL to entry + LOCK_ATR × ATR once profit reaches BREAKEVEN_ATR × ATR."""
+    if pos.get("breakeven_triggered") or not pos.get("atr"):
+        return
+
+    side   = pos["side"]
+    atr    = pos["atr"]
+    profit = (price - pos["entry_price"]) if side == "LONG" else (pos["entry_price"] - price)
+
+    if profit < BREAKEVEN_ATR * atr:
+        return
+
+    if side == "LONG":
+        new_sl = round_price(sym, pos["entry_price"] + LOCK_ATR * atr)
+        if pos["sl_price"] is not None and new_sl <= pos["sl_price"]:
+            return
+    else:
+        new_sl = round_price(sym, pos["entry_price"] - LOCK_ATR * atr)
+        if pos["sl_price"] is not None and new_sl >= pos["sl_price"]:
+            return
+
+    old_sl = pos["sl_price"]
+
+    if debug:
+        log.info(f"  {sym} [DEBUG]: BREAKEVEN activated — "
+                 f"SL {old_sl:.4f} → {new_sl:.4f}  (entry + {LOCK_ATR}×ATR)")
+    else:
+        if not update_sl(client, sym, pos["position_id"], new_sl):
+            return
+        log.info(f"  {sym}: BREAKEVEN activated — "
+                 f"SL {old_sl:.4f} → {new_sl:.4f}  (entry + {LOCK_ATR}×ATR)")
+
+    pos["sl_price"]           = new_sl
+    pos["breakeven_triggered"] = True
+
+
 # ── Per-symbol processing ──────────────────────────────────────────────────────
 
 def _process_symbol(client: BitunixClient, sym: str, s: dict,
@@ -538,15 +592,17 @@ def _enter_pending(client: BitunixClient, sym: str, s: dict,
 
     s["state"]    = "IN_TRADE"
     s["position"] = {
-        "position_id": order_id,
-        "side":        side,
-        "entry_price": entry_price,
-        "tp_price":    tp_price,
-        "sl_price":    sl_price,
-        "qty":         qty,
-        "opened_at":   now_utc(),
-        "debug":       debug,
-        "arm_id":      s["arm_id"],
+        "position_id":         order_id,
+        "side":                side,
+        "entry_price":         entry_price,
+        "tp_price":            tp_price,
+        "sl_price":            sl_price,
+        "qty":                 qty,
+        "opened_at":           now_utc(),
+        "debug":               debug,
+        "arm_id":              s["arm_id"],
+        "atr":                 atr,
+        "breakeven_triggered": False,
     }
     _clear_pending(s)
 
@@ -572,6 +628,10 @@ def _monitor_trade(client: BitunixClient, sym: str, s: dict,
             ema_reversed = True
         if ema_reversed:
             log.info(f"  {sym}: EMA reversal — fast={s['ema_fast']:.4f}  slow={s['ema_slow']:.4f}")
+
+    # Breakeven stop — may update pos["sl_price"] in-place
+    _check_breakeven(client, sym, pos, c1["close"], debug)
+    sl = pos["sl_price"]  # re-read after potential update
 
     if debug:
         price  = c1["close"]
@@ -758,15 +818,17 @@ def run(debug: bool, symbols: list[str] = None) -> None:
             side = "LONG" if p.get("side", "").upper() == "BUY" else "SHORT"
             sym_state[sym]["state"]    = "IN_TRADE"
             sym_state[sym]["position"] = {
-                "position_id": p.get("positionId"),
-                "side":        side,
-                "entry_price": float(p.get("avgOpenPrice", 0)),
-                "tp_price":    None,
-                "sl_price":    None,
-                "qty":         float(p.get("qty", 0)),
-                "opened_at":   now_utc(),
-                "debug":       False,
-                "arm_id":      "",
+                "position_id":         p.get("positionId"),
+                "side":                side,
+                "entry_price":         float(p.get("avgOpenPrice", 0)),
+                "tp_price":            None,
+                "sl_price":            None,
+                "qty":                 float(p.get("qty", 0)),
+                "opened_at":           now_utc(),
+                "debug":               False,
+                "arm_id":              "",
+                "atr":                 None,
+                "breakeven_triggered": False,
             }
             log.info(f"  Hydrated {sym} [{side}] @ "
                      f"{sym_state[sym]['position']['entry_price']:.4f}")
