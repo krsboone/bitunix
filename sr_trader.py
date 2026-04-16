@@ -36,6 +36,7 @@ from config import API_KEY, SECRET_KEY
 from market import fetch_ticker, compute_sigma
 from log_cap import start_logging
 import arm_log
+import position_registry
 
 start_logging("sr_trader")
 
@@ -428,10 +429,14 @@ def run(debug: bool, symbols: list[str] = None) -> None:
             sym = p.get("symbol")
             if sym not in active:
                 continue
+            pid  = p.get("positionId")
             side = "LONG" if p.get("side", "").upper() == "BUY" else "SHORT"
+            if not position_registry.owns(pid, STRATEGY):
+                log.info(f"  Skipping {sym} position {pid} — not owned by {STRATEGY}")
+                continue
             sym_state[sym]["state"]    = "IN_TRADE"
             sym_state[sym]["position"] = {
-                "position_id": p.get("positionId"),
+                "position_id": pid,
                 "side":        side,
                 "entry_price": float(p.get("avgOpenPrice", 0)),
                 "qty":         float(p.get("qty", 0)),
@@ -702,6 +707,7 @@ def _enter_trade(client: BitunixClient, sym: str, s: dict, cfg: dict,
         "debug":       debug,
         "arm_id":      saved_arm_id,
     }
+    position_registry.register(order_id, STRATEGY, sym, side, entry, saved_arm_id)
 
 
 def _monitor_trade(client: BitunixClient, sym: str, s: dict,
@@ -731,6 +737,7 @@ def _monitor_trade(client: BitunixClient, sym: str, s: dict,
                 arm_log.calc_pnl(side, pos["entry_price"], tp, pos["qty"], ROUND_TRIP_FEE),
                 order_id=pos.get("position_id"),
             )
+            position_registry.release(pos.get("position_id", ""))
             s["state"] = "WATCHING"
             s["position"] = None
         elif sl_hit:
@@ -741,6 +748,7 @@ def _monitor_trade(client: BitunixClient, sym: str, s: dict,
                 arm_log.calc_pnl(side, pos["entry_price"], sl, pos["qty"], ROUND_TRIP_FEE),
                 order_id=pos.get("position_id"),
             )
+            position_registry.release(pos.get("position_id", ""))
             s["state"] = "WATCHING"
             s["position"] = None
         elif held_mins >= MAX_HOLD_MINS:
@@ -751,6 +759,7 @@ def _monitor_trade(client: BitunixClient, sym: str, s: dict,
                 arm_log.calc_pnl(side, pos["entry_price"], price, pos["qty"], ROUND_TRIP_FEE),
                 order_id=pos.get("position_id"),
             )
+            position_registry.release(pos.get("position_id", ""))
             s["state"] = "WATCHING"
             s["position"] = None
         return
@@ -777,6 +786,7 @@ def _monitor_trade(client: BitunixClient, sym: str, s: dict,
             arm_log.calc_pnl(side, pos["entry_price"], exit_px, pos["qty"], ROUND_TRIP_FEE),
             order_id=pos.get("position_id"),
         )
+        position_registry.release(pos.get("position_id", ""))
         s["state"]    = "WATCHING"
         s["position"] = None
         return
@@ -799,6 +809,7 @@ def _monitor_trade(client: BitunixClient, sym: str, s: dict,
                 arm_log.calc_pnl(side, pos["entry_price"], c["close"], pos["qty"], ROUND_TRIP_FEE),
                 order_id=pos.get("position_id"),
             )
+            position_registry.release(pos.get("position_id", ""))
             s["state"]    = "WATCHING"
             s["position"] = None
 

@@ -36,6 +36,7 @@ from config import API_KEY, SECRET_KEY
 from market import fetch_ticker
 from log_cap import start_logging
 import arm_log
+import position_registry
 
 start_logging("bb_trader")
 
@@ -618,6 +619,7 @@ def _enter_pending(client: BitunixClient, sym: str, s: dict,
         "debug":       debug,
         "arm_id":      s["arm_id"],
     }
+    position_registry.register(order_id, STRATEGY, sym, side, entry_price, s["arm_id"])
     s["pending_side"] = s["pending_hw"] = None
     s["arm_id"] = s["arm_time"] = s["arm_price"] = None
 
@@ -666,6 +668,7 @@ def _monitor_trade(client: BitunixClient, sym: str, s: dict,
                 arm_log.calc_pnl(side, pos["entry_price"], exit_price, pos["qty"], ROUND_TRIP_FEE),
                 order_id=pos.get("position_id"),
             )
+            position_registry.release(pos.get("position_id", ""))
             if outcome == "SL":
                 if side == "LONG":  s["long_blocked"]  = COOLDOWN_5M
                 else:               s["short_blocked"] = COOLDOWN_5M
@@ -696,6 +699,7 @@ def _monitor_trade(client: BitunixClient, sym: str, s: dict,
             arm_log.calc_pnl(side, pos["entry_price"], exit_px, pos["qty"], ROUND_TRIP_FEE),
             order_id=pos.get("position_id"),
         )
+        position_registry.release(pos.get("position_id", ""))
         s["state"]    = "WATCHING"
         s["position"] = None
         return
@@ -717,6 +721,7 @@ def _monitor_trade(client: BitunixClient, sym: str, s: dict,
                 arm_log.calc_pnl(side, pos["entry_price"], c1["close"], pos["qty"], ROUND_TRIP_FEE),
                 order_id=pos.get("position_id"),
             )
+            position_registry.release(pos.get("position_id", ""))
             s["state"]    = "WATCHING"
             s["position"] = None
 
@@ -829,10 +834,14 @@ def run(debug: bool, symbols: list[str] = None) -> None:
             sym = p.get("symbol")
             if sym not in active:
                 continue
+            pid  = p.get("positionId")
             side = "LONG" if p.get("side", "").upper() == "BUY" else "SHORT"
+            if not position_registry.owns(pid, STRATEGY):
+                log.info(f"  Skipping {sym} position {pid} — not owned by {STRATEGY}")
+                continue
             sym_state[sym]["state"]    = "IN_TRADE"
             sym_state[sym]["position"] = {
-                "position_id": p.get("positionId"),
+                "position_id": pid,
                 "side":        side,
                 "entry_price": float(p.get("avgOpenPrice", 0)),
                 "tp_price":    None,
