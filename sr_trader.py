@@ -729,6 +729,7 @@ def _monitor_trade(client: BitunixClient, sym: str, s: dict,
                 pos.get("arm_id", ""), STRATEGY, sym, side,
                 "TP", tp, held_mins,
                 arm_log.calc_pnl(side, pos["entry_price"], tp, pos["qty"], ROUND_TRIP_FEE),
+                order_id=pos.get("position_id"),
             )
             s["state"] = "WATCHING"
             s["position"] = None
@@ -738,6 +739,7 @@ def _monitor_trade(client: BitunixClient, sym: str, s: dict,
                 pos.get("arm_id", ""), STRATEGY, sym, side,
                 "SL", sl, held_mins,
                 arm_log.calc_pnl(side, pos["entry_price"], sl, pos["qty"], ROUND_TRIP_FEE),
+                order_id=pos.get("position_id"),
             )
             s["state"] = "WATCHING"
             s["position"] = None
@@ -747,6 +749,7 @@ def _monitor_trade(client: BitunixClient, sym: str, s: dict,
                 pos.get("arm_id", ""), STRATEGY, sym, side,
                 "TIME", price, held_mins,
                 arm_log.calc_pnl(side, pos["entry_price"], price, pos["qty"], ROUND_TRIP_FEE),
+                order_id=pos.get("position_id"),
             )
             s["state"] = "WATCHING"
             s["position"] = None
@@ -772,6 +775,7 @@ def _monitor_trade(client: BitunixClient, sym: str, s: dict,
             pos.get("arm_id", ""), STRATEGY, sym, side,
             outcome_str, exit_px, held_mins,
             arm_log.calc_pnl(side, pos["entry_price"], exit_px, pos["qty"], ROUND_TRIP_FEE),
+            order_id=pos.get("position_id"),
         )
         s["state"]    = "WATCHING"
         s["position"] = None
@@ -793,6 +797,7 @@ def _monitor_trade(client: BitunixClient, sym: str, s: dict,
                 pos.get("arm_id", ""), STRATEGY, sym, side,
                 "TIME", c["close"], held_mins,
                 arm_log.calc_pnl(side, pos["entry_price"], c["close"], pos["qty"], ROUND_TRIP_FEE),
+                order_id=pos.get("position_id"),
             )
             s["state"]    = "WATCHING"
             s["position"] = None

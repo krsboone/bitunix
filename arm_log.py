@@ -50,6 +50,7 @@ _ARM_HEADER = [
 _CLOSE_HEADER = [
     "arm_id", "strategy", "symbol", "side",
     "outcome", "close_time", "exit_price", "hold_mins", "realized_pnl",
+    "order_id",
 ]
 
 
@@ -115,6 +116,7 @@ def log_close_event(
     exit_price: float | None,
     hold_mins: float,
     realized_pnl: float | None,
+    order_id: str | None = None,
 ) -> None:
     """Append one row to close_events.csv."""
     _ensure_file(CLOSE_EVENTS_CSV, _CLOSE_HEADER)
@@ -129,6 +131,7 @@ def log_close_event(
             f"{exit_price:.6f}" if exit_price is not None else "",
             f"{hold_mins:.1f}",
             f"{realized_pnl:.6f}" if realized_pnl is not None else "",
+            order_id or "",
         ])
 
 

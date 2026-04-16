@@ -398,7 +398,9 @@ def _check_breakeven(client: BitunixClient, sym: str, pos: dict,
     atr    = pos["atr"]
     profit = (price - pos["entry_price"]) if side == "LONG" else (pos["entry_price"] - price)
 
-    if profit < BREAKEVEN_ATR * atr:
+    target = BREAKEVEN_ATR * atr
+    log.debug(f"  {sym}: breakeven check — profit={profit:.4f}  threshold={target:.4f}  triggered={pos.get('breakeven_triggered')}")
+    if profit < target:
         return
 
     if side == "LONG":
@@ -551,6 +553,7 @@ def _enter_pending(client: BitunixClient, sym: str, s: dict,
         arm_log.log_arm_event(s["arm_id"], STRATEGY, sym, s["arm_time"], s["arm_price"],
                               side, "NO_FIRE", disarm_price=entry_price,
                               no_fire_reason="FEE_GATE", atr=atr)
+        s["state"] = "WATCHING"
         _clear_pending(s)
         return
 
@@ -562,6 +565,7 @@ def _enter_pending(client: BitunixClient, sym: str, s: dict,
         arm_log.log_arm_event(s["arm_id"], STRATEGY, sym, s["arm_time"], s["arm_price"],
                               side, "NO_FIRE", disarm_price=entry_price,
                               no_fire_reason="MIN_QTY", atr=atr)
+        s["state"] = "WATCHING"
         _clear_pending(s)
         return
 
@@ -573,6 +577,7 @@ def _enter_pending(client: BitunixClient, sym: str, s: dict,
         arm_log.log_arm_event(s["arm_id"], STRATEGY, sym, s["arm_time"], s["arm_price"],
                               side, "NO_FIRE", disarm_price=entry_price,
                               no_fire_reason="ORDER_FAILED", atr=atr)
+        s["state"] = "WATCHING"
         _clear_pending(s)
         return
 
@@ -668,6 +673,7 @@ def _monitor_trade(client: BitunixClient, sym: str, s: dict,
                 pos.get("arm_id", ""), STRATEGY, sym, side, outcome,
                 exit_price, held_mins,
                 arm_log.calc_pnl(side, pos["entry_price"], exit_price, pos["qty"], ROUND_TRIP_FEE),
+                order_id=pos.get("position_id"),
             )
             s["state"]    = "WATCHING"
             s["position"] = None
@@ -693,6 +699,7 @@ def _monitor_trade(client: BitunixClient, sym: str, s: dict,
             pos.get("arm_id", ""), STRATEGY, sym, side, outcome_str,
             exit_px, held_mins,
             arm_log.calc_pnl(side, pos["entry_price"], exit_px, pos["qty"], ROUND_TRIP_FEE),
+            order_id=pos.get("position_id"),
         )
         s["state"]    = "WATCHING"
         s["position"] = None
@@ -720,13 +727,13 @@ def _monitor_trade(client: BitunixClient, sym: str, s: dict,
                 pos.get("arm_id", ""), STRATEGY, sym, side, exit_reason,
                 c1["close"], held_mins,
                 arm_log.calc_pnl(side, pos["entry_price"], c1["close"], pos["qty"], ROUND_TRIP_FEE),
+                order_id=pos.get("position_id"),
             )
             s["state"]    = "WATCHING"
             s["position"] = None
 
 
 def _clear_pending(s: dict) -> None:
-    s["state"]        = "WATCHING"
     s["pending_side"] = None
     s["pending_atr"]  = None
     s["arm_id"]       = None
