@@ -633,15 +633,18 @@ def _monitor_trade(client: BitunixClient, sym: str, s: dict,
 
     if debug:
         price  = c1["close"]
-        tp_hit = (c1["high"] >= tp) if side == "LONG" else (c1["low"]  <= tp)
-        sl_hit = (c1["low"]  <= sl) if side == "LONG" else (c1["high"] >= sl)
+        tp_hit = (c1["high"] >= tp) if (side == "LONG"  and tp is not None) else \
+                 (c1["low"]  <= tp) if (side == "SHORT" and tp is not None) else False
+        sl_hit = (c1["low"]  <= sl) if (side == "LONG"  and sl is not None) else \
+                 (c1["high"] >= sl) if (side == "SHORT" and sl is not None) else False
         pnl    = (price - pos["entry_price"]) * pos["qty"]
         if side == "SHORT":
             pnl = -pnl
-
+        tp_str = f"{tp:.4f}" if tp is not None else "?"
+        sl_str = f"{sl:.4f}" if sl is not None else "?"
         log.info(f"  {sym} [DEBUG {side}]  entry={pos['entry_price']:.4f}  "
                  f"now={price:.4f}  uPnL≈{pnl:+.4f}  held={held_mins:.1f}min  "
-                 f"tp={tp:.4f}  sl={sl:.4f}")
+                 f"tp={tp_str}  sl={sl_str}")
 
         if tp_hit and sl_hit:
             outcome = "TP" if abs(tp - pos["entry_price"]) <= abs(sl - pos["entry_price"]) else "SL"
@@ -697,11 +700,13 @@ def _monitor_trade(client: BitunixClient, sym: str, s: dict,
         s["position"] = None
         return
 
-    p    = live[0]
-    upnl = float(p.get("unrealizedPNL", 0))
+    p      = live[0]
+    upnl   = float(p.get("unrealizedPNL", 0))
+    tp_str = f"{tp:.4f}" if tp is not None else "?"
+    sl_str = f"{sl:.4f}" if sl is not None else "?"
     log.info(f"  {sym} [{side}]  entry={pos['entry_price']:.4f}  "
              f"uPnL={upnl:+.4f}  held={held_mins:.1f}min  "
-             f"tp={tp:.4f}  sl={sl:.4f}")
+             f"tp={tp_str}  sl={sl_str}")
 
     if held_mins >= MAX_HOLD_MINS:
         log.info(f"  {sym}: time exit after {held_mins:.1f}min")
