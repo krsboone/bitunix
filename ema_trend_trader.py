@@ -59,6 +59,8 @@ SYMBOLS = list(SYMBOL_CONFIGS.keys())
 # ── Shared strategy parameters ─────────────────────────────────────────────────
 
 ATR_PERIOD      = 14
+ADX_PERIOD      = 14     # ADX smoothing period (sweep candidate)
+ADX_THRESHOLD   = 20     # minimum ADX to confirm trending market (sweep candidate)
 SL_MULT         = 2.0    # ATR multiples for exchange-managed safety stop
 TP_MULT         = 5.0    # ATR multiples for wide backstop (EMA re-cross is primary exit)
 MAX_HOLD_MINS   = 360    # 6-hour time exit backstop
@@ -267,6 +269,56 @@ def compute_atr(buf_15m: list[dict], period: int = ATR_PERIOD) -> float | None:
         for i in range(1, len(recent))
     ]
     return sum(trs) / len(trs)
+
+
+def compute_adx(buf_15m: list[dict], period: int = ADX_PERIOD) -> float | None:
+    """Compute ADX using Wilder smoothing. Requires 2×period + 1 candles."""
+    needed = period * 2 + 1
+    if len(buf_15m) < needed:
+        return None
+
+    candles = buf_15m[-needed:]
+
+    trs, plus_dms, minus_dms = [], [], []
+    for i in range(1, len(candles)):
+        h,  l  = candles[i]["high"],     candles[i]["low"]
+        ph, pl = candles[i - 1]["high"], candles[i - 1]["low"]
+        pc     = candles[i - 1]["close"]
+
+        tr   = max(h - l, abs(h - pc), abs(l - pc))
+        up   = h - ph
+        down = pl - l
+
+        trs.append(tr)
+        plus_dms.append(up   if up > down and up > 0   else 0.0)
+        minus_dms.append(down if down > up and down > 0 else 0.0)
+
+    # Seed Wilder smoothed values with first `period` bars
+    s_tr  = sum(trs[:period])
+    s_pdm = sum(plus_dms[:period])
+    s_mdm = sum(minus_dms[:period])
+
+    # Compute DX for each subsequent bar, then smooth into ADX
+    dx_vals = []
+    for i in range(period, len(trs)):
+        s_tr  = s_tr  - s_tr  / period + trs[i]
+        s_pdm = s_pdm - s_pdm / period + plus_dms[i]
+        s_mdm = s_mdm - s_mdm / period + minus_dms[i]
+
+        if s_tr == 0:
+            dx_vals.append(0.0)
+            continue
+        pdi = 100.0 * s_pdm / s_tr
+        mdi = 100.0 * s_mdm / s_tr
+        dx_vals.append(100.0 * abs(pdi - mdi) / (pdi + mdi) if (pdi + mdi) else 0.0)
+
+    if len(dx_vals) < period:
+        return None
+
+    adx = sum(dx_vals[:period]) / period
+    for dx in dx_vals[period:]:
+        adx = (adx * (period - 1) + dx) / period
+    return adx
 
 
 # ── API helpers ────────────────────────────────────────────────────────────────
@@ -498,7 +550,9 @@ def _process_symbol(client: BitunixClient, sym: str, s: dict,
     s["ema_slow"] = slow_alpha * close + (1 - slow_alpha) * prev_slow
 
     atr     = compute_atr(s["buf_15m"])
+    adx     = compute_adx(s["buf_15m"])
     atr_str = f"{atr:.4f}" if atr is not None else "n/a"
+    adx_str = f"{adx:.1f}"  if adx is not None else "n/a"
 
     # Detect crossover
     signal_side = None
@@ -510,11 +564,17 @@ def _process_symbol(client: BitunixClient, sym: str, s: dict,
     log.info(
         f"  {sym}  15m_close={close:.4f}  "
         f"ema_fast={s['ema_fast']:.4f}  ema_slow={s['ema_slow']:.4f}  "
-        f"atr={atr_str}"
+        f"atr={atr_str}  adx={adx_str}"
         + (f"  ← CROSS {signal_side}" if signal_side else "")
     )
 
     if signal_side is None or atr is None:
+        return
+
+    # ADX filter: require trending market before entering
+    if adx is None or adx < ADX_THRESHOLD:
+        adx_val = f"{adx:.1f}" if adx is not None else "n/a"
+        log.info(f"  {sym}: CROSS {signal_side} filtered — ADX {adx_val} < {ADX_THRESHOLD} (ranging)")
         return
 
     s["pending_side"] = signal_side
