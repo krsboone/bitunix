@@ -344,6 +344,27 @@ def place_order(client: BitunixClient, symbol: str, side: str,
     return order_id
 
 
+def resolve_position_id(client: BitunixClient, symbol: str, side: str,
+                        timeout: int = 10) -> str | None:
+    """
+    After a market order is placed, poll until the position appears and
+    return its positionId.  orderId ≠ positionId on Bitunix — they are
+    separate identifiers.  Market orders typically settle within 1–2 s.
+    """
+    api_side = "BUY" if side == "LONG" else "SELL"
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            for p in get_open_positions(client, symbol):
+                if (p.get("symbol") == symbol and
+                        p.get("side", "").upper() == api_side):
+                    return p.get("positionId")
+        except Exception:
+            pass
+        time.sleep(1)
+    return None
+
+
 def close_position(client: BitunixClient, position_id: str,
                    symbol: str, debug: bool) -> bool:
     if debug:
@@ -676,6 +697,16 @@ def _enter_trade(client: BitunixClient, sym: str, s: dict, cfg: dict,
         s["arm_id"] = s["arm_time"] = s["arm_price"] = None
         return
 
+    if debug:
+        position_id = order_id
+    else:
+        position_id = resolve_position_id(client, sym, side)
+        if position_id is None:
+            log.warning(f"  {sym}: could not resolve positionId after order {order_id} — falling back to orderId")
+            position_id = order_id
+        else:
+            log.info(f"  {sym}: resolved positionId={position_id}")
+
     arm_log.log_arm_event(s["arm_id"], STRATEGY, sym, s["arm_time"], s["arm_price"],
                           side, "FIRED", disarm_price=entry, atr=sigma)
     log_trade({
@@ -697,7 +728,7 @@ def _enter_trade(client: BitunixClient, sym: str, s: dict, cfg: dict,
     s["armed_level"] = s["armed_dir"] = None
     s["arm_id"] = s["arm_time"] = s["arm_price"] = None
     s["position"]    = {
-        "position_id": order_id,
+        "position_id": position_id,
         "side":        side,
         "entry_price": entry,
         "tp_price":    tp_price,
@@ -707,7 +738,7 @@ def _enter_trade(client: BitunixClient, sym: str, s: dict, cfg: dict,
         "debug":       debug,
         "arm_id":      saved_arm_id,
     }
-    position_registry.register(order_id, STRATEGY, sym, side, entry, saved_arm_id)
+    position_registry.register(position_id, STRATEGY, sym, side, entry, saved_arm_id)
 
 
 def _monitor_trade(client: BitunixClient, sym: str, s: dict,
