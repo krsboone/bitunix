@@ -14,13 +14,10 @@ Columns in reconciled_pnl.csv:
     est_exit_price  — price logged at close time (unreliable for EXCHANGE_CLOSED)
     est_pnl         — PnL estimated by the trader script
     actual_entry_price, actual_close_price
-    realized_pnl    — gross price-move PnL (excludes fees/funding per Bitunix docs)
-    fee             — transaction fees deducted during the position
-    funding         — cumulative funding fees during the position
-    net_pnl         — realized_pnl + fee + funding  (fee/funding are signed negative)
-
-Note: on first use, inspect 'fee' and 'funding' values. Bitunix docs describe them
-as "deducted" — if they appear as positive numbers, net_pnl will need sign correction.
+    realized_pnl    — Bitunix realizedPNL field: already net of fees and funding
+    fee             — fees paid (positive number, already deducted from realized_pnl)
+    funding         — funding paid (positive number, already deducted from realized_pnl)
+    net_pnl         — same as realized_pnl (confirmed: Bitunix deducts fee+funding before reporting)
 """
 
 import argparse
@@ -117,7 +114,7 @@ def reconcile(show: bool = False) -> None:
         realized  = _f(p.get("realizedPNL"))
         fee       = _f(p.get("fee"))
         funding   = _f(p.get("funding"))
-        net       = realized + fee + funding   # fee/funding expected negative (deductions)
+        net       = realized   # realizedPNL is already net of fee and funding
 
         print(f"    entry={p.get('entryPrice')}  close={p.get('closePrice')}"
               f"  realized={realized:+.6f}  fee={fee:.6f}  funding={funding:.6f}"
