@@ -50,25 +50,21 @@ def _load_done() -> set[str]:
         return {row["order_id"] for row in csv.DictReader(f) if row.get("order_id")}
 
 
-def _fetch_position(client: BitunixClient, order_id: str) -> dict | None:
-    """Query Bitunix position history for a single positionId."""
+def _fetch_symbol_history(client: BitunixClient, symbol: str) -> dict[str, dict]:
+    """Fetch all closed positions for a symbol and return a {positionId: data} lookup."""
     try:
-        resp = client.get("/api/v1/futures/position/history",
-                          {"positionId": order_id, "limit": "1"})
+        resp = client.get("/api/v1/futures/position/get_history_positions",
+                          {"symbol": symbol, "limit": "200"})
     except Exception as exc:
-        print(f"    Request error: {exc}")
-        return None
+        print(f"  Request error fetching {symbol} history: {exc}")
+        return {}
 
     if resp.get("code") != 0:
-        print(f"    API error: {resp.get('msg')}")
-        return None
+        print(f"  API error fetching {symbol} history: {resp.get('msg')}")
+        return {}
 
     positions = resp.get("data", {}).get("positionList", [])
-    if not positions:
-        print(f"    No position returned (ID may be from demo account or not yet settled)")
-        return None
-
-    return positions[0]
+    return {p["positionId"]: p for p in positions if p.get("positionId")}
 
 
 def reconcile(show: bool = False) -> None:
@@ -96,15 +92,26 @@ def reconcile(show: bool = False) -> None:
 
     print(f"Reconciling {len(pending)} position(s)...\n")
 
+    # Fetch history once per symbol — much cheaper than one API call per position
+    symbols  = {r["symbol"] for r in pending if r.get("symbol")}
+    history  = {}   # symbol → {positionId: data}
+    for sym in sorted(symbols):
+        history[sym] = _fetch_symbol_history(client, sym)
+        print(f"  Fetched {len(history[sym])} closed positions for {sym}")
+        time.sleep(0.3)
+    print()
+
     new_rows = []
     for row in pending:
         order_id = row["order_id"]
-        label    = f"{row.get('strategy','?')} {row.get('symbol','?')} {row.get('side','?')}"
+        symbol   = row.get("symbol", "")
+        label    = f"{row.get('strategy','?')} {symbol} {row.get('side','?')}"
         print(f"  {label}  {row.get('close_time','')}  [{order_id}]")
 
-        p = _fetch_position(client, order_id)
+        p = history.get(symbol, {}).get(order_id)
         if p is None:
-            time.sleep(0.5)
+            print(f"    positionId not found in {symbol} history "
+                  f"(may be a pre-fix orderId or not yet settled)")
             continue
 
         realized  = _f(p.get("realizedPNL"))
@@ -133,8 +140,6 @@ def reconcile(show: bool = False) -> None:
             "funding":             f"{funding:.6f}",
             "net_pnl":             f"{net:.6f}",
         })
-
-        time.sleep(0.3)   # gentle on the API
 
     if new_rows:
         write_header = not os.path.exists(RECONCILED_CSV)
