@@ -67,8 +67,8 @@ SYMBOLS = list(SYMBOL_CONFIGS.keys())
 
 # ── Shared strategy parameters ─────────────────────────────────────────────────
 
-TP_MULT        = 1.0    # sweep winner: both symbols
-SL_MULT        = 3.0    # sweep winner: both symbols
+TP_MULT        = 2.0    # 2026-04-23: changed from 1.0 — targeting 2:1 R:R
+SL_MULT        = 1.0    # 2026-04-23: changed from 3.0 — was causing ~1:5 realized R:R
 Z_ENTRY        = 1.2
 Z_RETEST       = 0.8    # Z-score threshold for retest bounce confirmation (sweep candidate)
 VOL_LOOKBACK   = 20
