@@ -348,6 +348,21 @@ def get_open_positions(client: BitunixClient, symbol: str = None) -> list[dict]:
     return data if isinstance(data, list) else []
 
 
+def get_closed_position(client: BitunixClient, symbol: str, position_id: str) -> dict | None:
+    """Fetch actual close data for a position from history. Returns None on any failure."""
+    try:
+        resp = client.get("/api/v1/futures/position/get_history_positions",
+                          {"symbol": symbol, "limit": "20"})
+        if resp.get("code") != 0:
+            return None
+        for p in resp.get("data", {}).get("positionList", []):
+            if p.get("positionId") == position_id:
+                return p
+    except Exception:
+        pass
+    return None
+
+
 def set_leverage(client: BitunixClient, symbol: str, debug: bool) -> None:
     if debug:
         log.info(f"  [DEBUG] Would set {symbol} leverage → {LEVERAGE}×")
@@ -778,16 +793,22 @@ def _monitor_trade(client: BitunixClient, sym: str, s: dict,
             if p.get("positionId") == pos["position_id"]]
 
     if not live:
-        cur_price = c1["close"]
         tp_px, sl_px = pos.get("tp_price"), pos.get("sl_price")
+        hist = get_closed_position(client, sym, pos["position_id"])
+        if hist:
+            close_px = float(hist.get("closePrice", c1["close"]))
+        else:
+            close_px = c1["close"]
+            log.warning(f"  {sym}: could not fetch close history, inferring from candle price")
+
         if tp_px is not None and sl_px is not None:
             if side == "LONG":
-                outcome_str = "TP" if cur_price >= tp_px else ("SL" if cur_price <= sl_px else "EXCHANGE_CLOSED")
+                outcome_str = "TP" if close_px >= tp_px else ("SL" if close_px <= sl_px else "EXCHANGE_CLOSED")
             else:
-                outcome_str = "TP" if cur_price <= tp_px else ("SL" if cur_price >= sl_px else "EXCHANGE_CLOSED")
-            exit_px = tp_px if outcome_str == "TP" else (sl_px if outcome_str == "SL" else cur_price)
+                outcome_str = "TP" if close_px <= tp_px else ("SL" if close_px >= sl_px else "EXCHANGE_CLOSED")
+            exit_px = tp_px if outcome_str == "TP" else (sl_px if outcome_str == "SL" else close_px)
         else:
-            outcome_str, exit_px = "EXCHANGE_CLOSED", cur_price
+            outcome_str, exit_px = "EXCHANGE_CLOSED", close_px
         log.info(f"  {sym}: position closed by exchange ({outcome_str})")
         arm_log.log_close_event(
             pos.get("arm_id", ""), STRATEGY, sym, side, outcome_str,
