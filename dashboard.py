@@ -26,14 +26,17 @@ CLOSE_CSV = os.path.join("log", "close_events.csv")
 OUT_HTML  = os.path.join("log", "dashboard.html")
 
 STRATEGY_COLORS = {
-    "bb":         "#3b82f6",   # blue
-    "sr":         "#10b981",   # emerald
-    "sr_rt":      "#06b6d4",   # cyan
-    "ema_trend":  "#8b5cf6",   # violet
-    "vol_spike":  "#f59e0b",   # amber
-    "exhaustion": "#ec4899",   # pink
+    "bb":           "#3b82f6",   # blue
+    "bb_limit":     "#60a5fa",   # light blue
+    "sr":           "#10b981",   # emerald
+    "sr_limit":     "#34d399",   # light emerald
+    "sr_rt":        "#06b6d4",   # cyan
+    "sr_rt_limit":  "#67e8f9",   # light cyan
+    "ema_trend":    "#8b5cf6",   # violet
+    "vol_spike":    "#f59e0b",   # amber
+    "exhaustion":   "#ec4899",   # pink
 }
-STRATEGY_ORDER = ["bb", "sr", "sr_rt", "ema_trend", "vol_spike", "exhaustion"]
+STRATEGY_ORDER = ["bb", "bb_limit", "sr", "sr_limit", "sr_rt", "sr_rt_limit", "ema_trend", "vol_spike", "exhaustion"]
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────

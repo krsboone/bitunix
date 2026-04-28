@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 
 ARM_CSV      = os.path.join("log", "arm_events.csv")
 DATA_DIR     = "data"
-MAX_HOLD_MINS = 33   # all strategies use 33 min hold
+MAX_HOLD_MINS = 60   # use the longest hold across all strategies (bb/bb_limit use 60)
 
 CANDLE_FILES = {
     "BTCUSDT": os.path.join(DATA_DIR, "BTCUSDT_1m.csv"),
