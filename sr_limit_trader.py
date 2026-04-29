@@ -94,6 +94,17 @@ PRECISION = {
     "ETHUSDT": {"qty": 3, "price": 2},
 }
 
+DATA_DIR = "data"
+
+# ── Trend filter parameters ────────────────────────────────────────────────────
+
+TREND_SHORT_CANDLES = 60      # 1h of 1m candles — short-term channel
+TREND_LONG_CANDLES  = 480     # 8h of 1m candles — long-term channel
+TREND_BANDS_SIGMA   = 2.0     # channel half-width in residual std-devs
+CHAN_LONG_MAX       = 0.65    # LONG ok only when channel_pos ≤ this
+CHAN_SHORT_MIN      = 0.35    # SHORT ok only when channel_pos ≥ this
+TREND_DEADBAND      = 0.00005 # |slope_pct| below which trend counts as flat
+
 # ── Logging ────────────────────────────────────────────────────────────────────
 
 logging.basicConfig(
@@ -160,6 +171,61 @@ def fetch_latest_candles(client: BitunixClient, symbol: str,
     return [normalize(c) for c in resp.get("data", [])]
 
 
+def load_candles_csv(symbol: str) -> list[dict]:
+    path = os.path.join(DATA_DIR, f"{symbol}_1m.csv")
+    if not os.path.exists(path):
+        return []
+    candles = []
+    with open(path, newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            candles.append({
+                "time":   int(row["timestamp_ms"]),
+                "open":   float(row["open"]),
+                "high":   float(row["high"]),
+                "low":    float(row["low"]),
+                "close":  float(row["close"]),
+                "volume": float(row.get("volume", 0)),
+            })
+    candles.sort(key=lambda c: c["time"])
+    return candles
+
+
+def fetch_gap_candles(client: BitunixClient, symbol: str,
+                      after_ms: int) -> list[dict]:
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    end_ms = now_ms
+    raw    = []
+
+    while True:
+        resp = client.get("/api/v1/futures/market/kline", {
+            "symbol":   symbol,
+            "interval": INTERVAL,
+            "limit":    "1000",
+            "endTime":  str(end_ms),
+        })
+        if resp.get("code") != 0:
+            raise RuntimeError(f"Kline error: {resp.get('msg')}")
+        batch = resp.get("data", [])
+        if not batch:
+            break
+        batch = [c for c in batch if int(c["time"]) > after_ms]
+        raw.extend(batch)
+        oldest = min(int(c["time"]) for c in resp["data"])
+        if oldest <= after_ms:
+            break
+        end_ms = oldest - 1
+
+    seen, candles = set(), []
+    for c in raw:
+        ts = int(c["time"])
+        if ts not in seen:
+            seen.add(ts)
+            candles.append(normalize(c))
+    candles.sort(key=lambda c: c["time"])
+    return candles
+
+
 # ── S/R level computation ──────────────────────────────────────────────────────
 
 def utc_date_of(ts_ms: int) -> date:
@@ -205,6 +271,73 @@ def compute_levels(s: dict, buf: list[dict]) -> list[float]:
         lvl.add(s["prev_sess_high"])
         lvl.add(s["prev_sess_low"])
     return sorted(lvl)
+
+
+# ── Trend filter ──────────────────────────────────────────────────────────────
+
+def compute_trend(buf: list[dict], n_candles: int, bands_sigma: float) -> dict | None:
+    if len(buf) < n_candles:
+        return None
+    closes = [c["close"] for c in buf[-n_candles:]]
+    n      = len(closes)
+    x_mean = (n - 1) / 2
+    y_mean = sum(closes) / n
+    ss_xy  = sum((i - x_mean) * (closes[i] - y_mean) for i in range(n))
+    ss_xx  = sum((i - x_mean) ** 2 for i in range(n))
+    if ss_xx == 0:
+        return None
+    slope     = ss_xy / ss_xx
+    intercept = y_mean - slope * x_mean
+    predicted = [intercept + slope * i for i in range(n)]
+    residuals = [closes[i] - predicted[i] for i in range(n)]
+    ss_res    = sum(r ** 2 for r in residuals)
+    std_res   = math.sqrt(ss_res / (n - 2)) if n > 2 else 0.0
+    ss_tot    = sum((cv - y_mean) ** 2 for cv in closes)
+    r2        = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+    center    = predicted[-1]
+    upper     = center + bands_sigma * std_res
+    lower     = center - bands_sigma * std_res
+    current   = closes[-1]
+    chan_pos  = max(0.0, min(1.0, (current - lower) / (upper - lower) if upper > lower else 0.5))
+    slope_pct = slope / y_mean if y_mean > 0 else 0.0
+    return {
+        "slope": slope, "slope_pct": slope_pct, "r2": r2,
+        "center": center, "upper": upper, "lower": lower, "chan_pos": chan_pos,
+    }
+
+
+def _check_trend_alignment(side: str,
+                            short_t: dict | None,
+                            long_t:  dict | None) -> tuple[bool, str]:
+    """
+    Returns (ok, reason).
+    Not enough history → allow (returns True).
+    LONG: block if price already near channel top, or long trend clearly bearish.
+    SHORT: block if price already near channel bottom, or long trend clearly bullish.
+    """
+    if short_t is None or long_t is None:
+        return True, "no_trend_data"
+
+    short_pos = short_t["chan_pos"]
+    long_pos  = long_t["chan_pos"]
+    long_slp  = long_t["slope_pct"]
+
+    if side == "LONG":
+        if short_pos > CHAN_LONG_MAX:
+            return False, f"short_chan={short_pos:.2f}>{CHAN_LONG_MAX}"
+        if long_pos > CHAN_LONG_MAX:
+            return False, f"long_chan={long_pos:.2f}>{CHAN_LONG_MAX}"
+        if long_slp < -TREND_DEADBAND:
+            return False, f"long_trend_bearish({long_slp:.6f})"
+        return True, "ok"
+    else:
+        if short_pos < CHAN_SHORT_MIN:
+            return False, f"short_chan={short_pos:.2f}<{CHAN_SHORT_MIN}"
+        if long_pos < CHAN_SHORT_MIN:
+            return False, f"long_chan={long_pos:.2f}<{CHAN_SHORT_MIN}"
+        if long_slp > TREND_DEADBAND:
+            return False, f"long_trend_bullish({long_slp:.6f})"
+        return True, "ok"
 
 
 # ── Signal computation ─────────────────────────────────────────────────────────
@@ -475,8 +608,21 @@ def run(debug: bool, symbols: list[str] = None) -> None:
     # ── Initialise per-symbol state ────────────────────────────────────────────
     sym_state: dict[str, dict] = {}
     for sym in active:
-        log.info(f"  {sym}: fetching {INIT_PAGES * 1000} candles for init...")
-        buf  = fetch_candles_paged(client, sym, pages=INIT_PAGES)
+        csv_candles = load_candles_csv(sym)
+        if csv_candles:
+            log.info(f"  {sym}: {len(csv_candles):,} candles from local CSV "
+                     f"({datetime.fromtimestamp(csv_candles[0]['time']/1000, tz=timezone.utc).strftime('%Y-%m-%d')} "
+                     f"→ {datetime.fromtimestamp(csv_candles[-1]['time']/1000, tz=timezone.utc).strftime('%Y-%m-%d')})")
+            log.info(f"  {sym}: fetching gap candles from API...")
+            gap_candles = fetch_gap_candles(client, sym, csv_candles[-1]["time"])
+            log.info(f"  {sym}: {len(gap_candles)} gap candles fetched")
+            all_candles = csv_candles + gap_candles
+        else:
+            log.info(f"  {sym}: no local CSV — fetching {INIT_PAGES * 1000} candles from API...")
+            all_candles = fetch_candles_paged(client, sym, pages=INIT_PAGES)
+            log.info(f"  {sym}: {len(all_candles)} candles fetched from API")
+
+        buf  = all_candles[-2000:]
         sess = init_session(buf)
         sym_state[sym] = {
             "buf":              buf,
@@ -592,8 +738,13 @@ def _process_symbol(client: BitunixClient, sym: str, s: dict, cfg: dict,
     sigma, z, vol_avg = signals(buf)
     vol_now = c["volume"]
 
+    trend_short = compute_trend(buf, TREND_SHORT_CANDLES, TREND_BANDS_SIGMA)
+    trend_long  = compute_trend(buf, TREND_LONG_CANDLES,  TREND_BANDS_SIGMA)
+
+    sp = f"{trend_short['chan_pos']:.2f}" if trend_short else "?"
+    lp = f"{trend_long['chan_pos']:.2f}"  if trend_long  else "?"
     log.info(f"  {sym}  price={price:.4f}  σ={sigma*100:.4f}%  "
-             f"z={z:+.3f}  state={s['state']}")
+             f"z={z:+.3f}  chan_pos(1h/8h)={sp}/{lp}  state={s['state']}")
 
     # ── 2. State machine ───────────────────────────────────────────────────────
 
@@ -699,13 +850,18 @@ def _process_symbol(client: BitunixClient, sym: str, s: dict, cfg: dict,
         return
 
     if near_level is not None:
-        s["state"]       = "ARMED"
-        s["armed_level"] = near_level
-        s["armed_dir"]   = near_dir
-        s["arm_id"]      = arm_log.new_arm_id()
-        s["arm_time"]    = now_utc().strftime("%Y-%m-%d %H:%M:%S")
-        s["arm_price"]   = price
-        log.info(f"  {sym}: ARMED  level={near_level:.4f}  dir={near_dir}")
+        side_est = "LONG" if near_dir == "UP" else "SHORT"
+        trend_ok, trend_reason = _check_trend_alignment(side_est, trend_short, trend_long)
+        if not trend_ok:
+            log.info(f"  {sym}: TREND_SKIP [{side_est}] level={near_level:.4f} — {trend_reason}")
+        else:
+            s["state"]       = "ARMED"
+            s["armed_level"] = near_level
+            s["armed_dir"]   = near_dir
+            s["arm_id"]      = arm_log.new_arm_id()
+            s["arm_time"]    = now_utc().strftime("%Y-%m-%d %H:%M:%S")
+            s["arm_price"]   = price
+            log.info(f"  {sym}: ARMED  level={near_level:.4f}  dir={near_dir}")
 
 
 def _enter_trade(client: BitunixClient, sym: str, s: dict, cfg: dict,
