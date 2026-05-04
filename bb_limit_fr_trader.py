@@ -120,17 +120,26 @@ TRADE_CSV = os.path.join("log", "bb_limit_fr_trades.csv")
 # ── Funding rate helpers ───────────────────────────────────────────────────────
 
 def fetch_funding_rates(client: BitunixClient) -> dict[str, float]:
-    """Return {symbol: current_funding_rate} for all active symbols."""
-    try:
-        resp = client.get("/api/v1/futures/market/funding_rate/batch", {})
-        if resp.get("code") != 0:
-            log.warning(f"  Funding rate fetch failed: {resp.get('msg')}")
-            return {}
-        return {item["symbol"]: float(item["fundingRate"])
-                for item in resp.get("data", [])}
-    except Exception as e:
-        log.warning(f"  Funding rate fetch error: {e}")
-        return {}
+    """Return {symbol: most_recently_settled_funding_rate}.
+
+    Uses the history endpoint (settled rates) rather than the batch endpoint
+    (live pre-settlement rate) — the backtest was built on settled rates and
+    the live rate fluctuates too wildly to be a reliable filter signal.
+    """
+    rates = {}
+    for symbol in SYMBOLS:
+        try:
+            resp = client.get("/api/v1/futures/market/get_funding_rate_history",
+                              {"symbol": symbol, "limit": "1"})
+            if resp.get("code") != 0:
+                log.warning(f"  Funding history fetch failed {symbol}: {resp.get('msg')}")
+                continue
+            data = resp.get("data") or []
+            if data:
+                rates[symbol] = float(data[0]["fundingRate"])
+        except Exception as e:
+            log.warning(f"  Funding rate fetch error {symbol}: {e}")
+    return rates
 
 
 def funding_allows(signal_side: str, funding_rate: float | None) -> tuple[bool, str]:
