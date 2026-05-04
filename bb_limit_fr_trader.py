@@ -1,20 +1,24 @@
 """
-bb_limit_trader.py — BB Momentum trader: limit entry + limit TP
+bb_limit_fr_trader.py — BB Momentum trader with funding-rate filter
 
-Same BB strategy as bb_trader.py. Differences:
-  - Entry:  limit order at signal price  → maker fee on open
-  - Cancel: if unfilled after LIMIT_ENTRY_TIMEOUT_MINS, or price drifts
-            LIMIT_CANCEL_DRIFT_PCT against the signal direction
-  - TP:     separate limit close order placed after entry fills → maker fee on close
-  - SL:     stop-market inline on entry order (execution guaranteed)
+Same as bb_limit_trader.py with one addition:
+  - Funding rate is fetched each cycle and used as a directional gate.
+  - Positive funding (longs paying) → LONG signals skipped, SHORT allowed.
+  - Negative funding (shorts paying) → SHORT signals skipped, LONG allowed.
+  - Neutral (within ±FUNDING_THRESH) → both directions trade normally.
+
+Rationale: 205 days of data show that when funding is positive, BTC/ETH
+drift down over the next 15m–4h (avg −0.033% to −0.170%). Filtering
+counter-funding signals is intended to lift the TP rate above the
+bb_limit baseline (~55.5%).
 
 State machine:
   WATCHING → ENTRY_PENDING → LIMIT_OPEN → IN_TRADE → WATCHING
 
 Usage:
-    python3 bb_limit_trader.py              # live trading
-    python3 bb_limit_trader.py --debug      # DEBUG mode — no real orders
-    python3 bb_limit_trader.py --symbol BTCUSDT
+    python3 bb_limit_fr_trader.py              # live trading
+    python3 bb_limit_fr_trader.py --debug      # DEBUG mode — no real orders
+    python3 bb_limit_fr_trader.py --symbol BTCUSDT
 """
 
 import argparse
@@ -35,7 +39,7 @@ import position_registry
 
 start_logging("bb_limit_trader")
 
-STRATEGY = "bb_limit"
+STRATEGY = "bb_limit_fr"
 
 # ── Per-symbol sweep-optimised config (same as bb_trader.py) ──────────────────
 
@@ -76,6 +80,15 @@ MIN_HISTORY_5M   = max(50, SQUEEZE_LOOKBACK) + 10
 
 # ── Trading parameters ─────────────────────────────────────────────────────────
 
+# ── Funding rate filter ────────────────────────────────────────────────────────
+
+# Signals whose direction opposes the funding bias are skipped.
+# Set to 0.0 to disable (trade all signals regardless of funding).
+FUNDING_THRESH        = 0.00005   # 0.005% — below this is treated as neutral
+FUNDING_REFRESH_SECS  = 900       # re-fetch funding every 15 minutes
+
+# ── Trading parameters ─────────────────────────────────────────────────────────
+
 LEVERAGE         = 2
 MARGIN_COIN      = "USDT"
 INTERVAL         = "1m"
@@ -101,7 +114,41 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-TRADE_CSV = os.path.join("log", "bb_limit_trades.csv")
+TRADE_CSV = os.path.join("log", "bb_limit_fr_trades.csv")
+
+
+# ── Funding rate helpers ───────────────────────────────────────────────────────
+
+def fetch_funding_rates(client: BitunixClient) -> dict[str, float]:
+    """Return {symbol: current_funding_rate} for all active symbols."""
+    try:
+        resp = client.get("/api/v1/futures/market/funding_rate/batch", {})
+        if resp.get("code") != 0:
+            log.warning(f"  Funding rate fetch failed: {resp.get('msg')}")
+            return {}
+        return {item["symbol"]: float(item["fundingRate"])
+                for item in resp.get("data", [])}
+    except Exception as e:
+        log.warning(f"  Funding rate fetch error: {e}")
+        return {}
+
+
+def funding_allows(signal_side: str, funding_rate: float | None) -> tuple[bool, str]:
+    """
+    Return (allowed, reason_str).
+    Positive funding → longs pay shorts → skip LONG, allow SHORT.
+    Negative funding → shorts pay longs → skip SHORT, allow LONG.
+    Neutral or unknown → allow both.
+    """
+    if funding_rate is None:
+        return True, "unknown"
+    if funding_rate > FUNDING_THRESH and signal_side == "LONG":
+        return False, f"funding={funding_rate*100:+.4f}% (positive — skip LONG)"
+    if funding_rate < -FUNDING_THRESH and signal_side == "SHORT":
+        return False, f"funding={funding_rate*100:+.4f}% (negative — skip SHORT)"
+    bias = "neutral" if abs(funding_rate) <= FUNDING_THRESH else (
+        "aligned-SHORT" if funding_rate > 0 else "aligned-LONG")
+    return True, f"funding={funding_rate*100:+.4f}% ({bias})"
 
 
 # ── Candle helpers ─────────────────────────────────────────────────────────────
@@ -594,22 +641,42 @@ def _process_symbol(client: BitunixClient, sym: str, s: dict,
              f"state={s['state']}")
 
     if signal_side == "LONG":
-        s["pending_side"] = "LONG"
-        s["pending_hw"]   = hw
-        s["state"]        = "ENTRY_PENDING"
-        s["arm_id"]       = arm_log.new_arm_id()
-        s["arm_time"]     = now_utc().strftime("%Y-%m-%d %H:%M:%S")
-        s["arm_price"]    = price
-        log.info(f"  {sym}: LONG signal  upper={upper:.4f}  hw={hw:.4f}")
+        fr       = s.get("funding_rate")
+        allowed, fr_reason = funding_allows("LONG", fr)
+        if not allowed:
+            log.info(f"  {sym}: LONG signal FILTERED — {fr_reason}")
+            arm_log.log_arm_event(
+                arm_log.new_arm_id(), STRATEGY, sym,
+                now_utc().strftime("%Y-%m-%d %H:%M:%S"), price, "LONG",
+                "NO_FIRE", no_fire_reason="FUNDING_FILTER", atr=hw,
+            )
+        else:
+            log.info(f"  {sym}: LONG signal  upper={upper:.4f}  hw={hw:.4f}  {fr_reason}")
+            s["pending_side"] = "LONG"
+            s["pending_hw"]   = hw
+            s["state"]        = "ENTRY_PENDING"
+            s["arm_id"]       = arm_log.new_arm_id()
+            s["arm_time"]     = now_utc().strftime("%Y-%m-%d %H:%M:%S")
+            s["arm_price"]    = price
 
     elif signal_side == "SHORT":
-        s["pending_side"] = "SHORT"
-        s["pending_hw"]   = hw
-        s["state"]        = "ENTRY_PENDING"
-        s["arm_id"]       = arm_log.new_arm_id()
-        s["arm_time"]     = now_utc().strftime("%Y-%m-%d %H:%M:%S")
-        s["arm_price"]    = price
-        log.info(f"  {sym}: SHORT signal  lower={lower:.4f}  hw={hw:.4f}")
+        fr       = s.get("funding_rate")
+        allowed, fr_reason = funding_allows("SHORT", fr)
+        if not allowed:
+            log.info(f"  {sym}: SHORT signal FILTERED — {fr_reason}")
+            arm_log.log_arm_event(
+                arm_log.new_arm_id(), STRATEGY, sym,
+                now_utc().strftime("%Y-%m-%d %H:%M:%S"), price, "SHORT",
+                "NO_FIRE", no_fire_reason="FUNDING_FILTER", atr=hw,
+            )
+        else:
+            log.info(f"  {sym}: SHORT signal  lower={lower:.4f}  hw={hw:.4f}  {fr_reason}")
+            s["pending_side"] = "SHORT"
+            s["pending_hw"]   = hw
+            s["state"]        = "ENTRY_PENDING"
+            s["arm_id"]       = arm_log.new_arm_id()
+            s["arm_time"]     = now_utc().strftime("%Y-%m-%d %H:%M:%S")
+            s["arm_price"]    = price
 
     else:
         blocked = []
@@ -936,9 +1003,10 @@ def run(debug: bool, symbols: list[str] = None) -> None:
     active = symbols or SYMBOLS
 
     log.info("━" * 60)
-    log.info("  BB Momentum Trader — Limit Orders")
+    log.info("  BB Momentum Trader — Limit Orders + Funding Filter")
     log.info(f"  Symbols   : {', '.join(active)}")
     log.info(f"  TP/SL     : {TP_MULT}/{SL_MULT}× half-band-width")
+    log.info(f"  Funding   : threshold=±{FUNDING_THRESH*100:.3f}%  refresh={FUNDING_REFRESH_SECS}s")
     log.info(f"  Squeeze   : threshold={SQUEEZE_THRESH}  lookback={SQUEEZE_LOOKBACK}")
     log.info(f"  Cooldown  : {COOLDOWN_5M} 5m-candles after SL")
     log.info(f"  Hold      : ≤{MAX_HOLD_MINS}min  |  Leverage: {LEVERAGE}×")
@@ -1021,6 +1089,8 @@ def run(debug: bool, symbols: list[str] = None) -> None:
             "arm_id":         None,
             "arm_time":       None,
             "arm_price":      None,
+            # Funding rate cache (refreshed every FUNDING_REFRESH_SECS)
+            "funding_rate":   None,
         }
         log.info(f"  {sym}: {len(buf_5m)} 5m candles in buf  "
                  f"bw_history={len(bw_history)} entries — ready")
@@ -1053,12 +1123,35 @@ def run(debug: bool, symbols: list[str] = None) -> None:
                      f"{sym_state[sym]['position']['entry_price']:.4f}  "
                      f"(note: TP limit order unknown after restart — time exit only)")
 
+    # ── Initial funding rate fetch ─────────────────────────────────────────────
+    funding_last_fetched = 0.0
+    log.info("  Fetching initial funding rates...")
+    rates = fetch_funding_rates(client)
+    for sym in active:
+        sym_state[sym]["funding_rate"] = rates.get(sym)
+        fr = sym_state[sym]["funding_rate"]
+        log.info(f"  {sym} funding rate: {fr*100:+.4f}%" if fr is not None else
+                 f"  {sym} funding rate: unavailable")
+    funding_last_fetched = time.time()
+
     # ── Main cycle ─────────────────────────────────────────────────────────────
     while True:
         try:
             cycle_start = now_utc()
             balance     = get_balance(client)
             log.info(f"  Balance: {balance:.4f}  |  {cycle_start.strftime('%H:%M:%S')} UTC")
+
+            # Refresh funding rates every FUNDING_REFRESH_SECS
+            if time.time() - funding_last_fetched >= FUNDING_REFRESH_SECS:
+                rates = fetch_funding_rates(client)
+                if rates:
+                    for sym in active:
+                        old = sym_state[sym].get("funding_rate")
+                        new = rates.get(sym)
+                        sym_state[sym]["funding_rate"] = new
+                        if new is not None and old != new:
+                            log.info(f"  {sym} funding rate updated: {new*100:+.4f}%")
+                    funding_last_fetched = time.time()
 
             if balance < min_balance:
                 log.warning(f"  CIRCUIT BREAKER: {balance:.4f} < floor "
