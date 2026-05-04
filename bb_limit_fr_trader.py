@@ -37,7 +37,7 @@ from log_cap import start_logging
 import arm_log
 import position_registry
 
-start_logging("bb_limit_trader")
+start_logging("bb_limit_fr")
 
 STRATEGY = "bb_limit_fr"
 
