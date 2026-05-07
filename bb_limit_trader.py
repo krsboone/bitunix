@@ -64,7 +64,7 @@ SL_MULT          = 2.0
 SQUEEZE_THRESH   = 1.0
 SQUEEZE_LOOKBACK = 50
 COOLDOWN_5M      = 5
-MAX_HOLD_MINS    = 60
+MAX_HOLD_MINS    = 240
 
 # ── Limit order parameters ─────────────────────────────────────────────────────
 

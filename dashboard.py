@@ -26,17 +26,25 @@ CLOSE_CSV = os.path.join("log", "close_events.csv")
 OUT_HTML  = os.path.join("log", "dashboard.html")
 
 STRATEGY_COLORS = {
-    "bb":           "#3b82f6",   # blue
-    "bb_limit":     "#60a5fa",   # light blue
-    "bb_limit_fr":  "#93c5fd",   # sky blue (bb_limit + funding filter)
-    "sr":           "#10b981",   # emerald
-    "sr_limit":     "#34d399",   # light emerald
-    "sr_rt":        "#06b6d4",   # cyan
-    "ema_trend":    "#8b5cf6",   # violet
-    "vol_spike":    "#f59e0b",   # amber
-    "exhaustion":   "#ec4899",   # pink
+    "bb":             "#3b82f6",   # blue
+    "bb_limit":       "#60a5fa",   # light blue
+    "bb_limit_fr":    "#93c5fd",   # sky blue (bb_limit + funding filter)
+    "bb_limit_dir":   "#38bdf8",   # sky (bb_limit + directional filter)
+    "sr":             "#10b981",   # emerald
+    "sr_limit":       "#34d399",   # light emerald
+    "sr_rt":          "#06b6d4",   # cyan
+    "sr_bounce":      "#4ade80",   # green
+    "ema_trend":      "#8b5cf6",   # violet
+    "ema_trend_dir":  "#c4b5fd",   # light violet (ema_trend + directional filter)
+    "vol_spike":      "#f59e0b",   # amber
+    "exhaustion":     "#ec4899",   # pink
 }
-STRATEGY_ORDER = ["bb", "bb_limit", "bb_limit_fr", "sr", "sr_limit", "sr_rt", "ema_trend", "vol_spike", "exhaustion"]
+STRATEGY_ORDER = [
+    "bb", "bb_limit", "bb_limit_fr", "bb_limit_dir",
+    "sr", "sr_limit", "sr_rt", "sr_bounce",
+    "ema_trend", "ema_trend_dir",
+    "vol_spike", "exhaustion",
+]
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
