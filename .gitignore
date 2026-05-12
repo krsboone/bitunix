@@ -1,4 +1,5 @@
 config.py
+tingly.py
 __pycache__/
 *.pyc
 *.log
