@@ -406,16 +406,18 @@ def get_order_status(client: BitunixClient, order_id: str, symbol: str) -> str |
 
 
 def place_limit_tp(client: BitunixClient, symbol: str, side: str,
-                   qty: float, tp_price: float, debug: bool) -> str | None:
+                   qty: float, tp_price: float, position_id: str,
+                   debug: bool) -> str | None:
     """Limit CLOSE order at the TP price."""
     close_side = "SELL" if side == "LONG" else "BUY"
     body = {
-        "symbol":    symbol,
-        "qty":       str(qty),
-        "side":      close_side,
-        "orderType": "LIMIT",
-        "price":     str(round_price(symbol, tp_price)),
-        "tradeSide": "CLOSE",
+        "symbol":     symbol,
+        "qty":        str(qty),
+        "side":       close_side,
+        "orderType":  "LIMIT",
+        "price":      str(round_price(symbol, tp_price)),
+        "tradeSide":  "CLOSE",
+        "positionId": position_id,
     }
     if debug:
         log.info(f"  [DEBUG] Would place limit TP: {json.dumps(body)}")
@@ -756,7 +758,7 @@ def _monitor_limit_order(client: BitunixClient, sym: str, s: dict,
             log.info(f"  {sym}: resolved positionId={position_id}")
 
     # Place limit TP close order
-    tp_order_id = place_limit_tp(client, sym, side, qty, tp_price, debug)
+    tp_order_id = place_limit_tp(client, sym, side, qty, tp_price, position_id, debug)
 
     log.info(f"  {sym}: limit FILLED [{side}] @ {entry_price:.4f}  "
              f"tp_order={tp_order_id} @ {tp_price:.4f}  sl={sl_price:.4f}")

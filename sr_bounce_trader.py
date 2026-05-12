@@ -414,16 +414,18 @@ def place_market_entry(client: BitunixClient, symbol: str, side: str,
 
 
 def place_limit_tp(client: BitunixClient, symbol: str, side: str,
-                   qty: float, tp_price: float, debug: bool) -> str | None:
+                   qty: float, tp_price: float, position_id: str,
+                   debug: bool) -> str | None:
     """Limit CLOSE order at TP price."""
     close_side = "SELL" if side == "LONG" else "BUY"
     body = {
-        "symbol":    symbol,
-        "qty":       str(qty),
-        "side":      close_side,
-        "orderType": "LIMIT",
-        "price":     str(round_price(symbol, tp_price)),
-        "tradeSide": "CLOSE",
+        "symbol":     symbol,
+        "qty":        str(qty),
+        "side":       close_side,
+        "orderType":  "LIMIT",
+        "price":      str(round_price(symbol, tp_price)),
+        "tradeSide":  "CLOSE",
+        "positionId": position_id,
     }
     if debug:
         log.info(f"  [DEBUG] Would place limit TP: {json.dumps(body)}")
@@ -828,7 +830,7 @@ def _enter_trade(client: BitunixClient, sym: str, s: dict, cfg: dict,
         else:
             log.info(f"  {sym}: positionId={position_id}")
 
-    tp_order_id = place_limit_tp(client, sym, side, qty, tp_price, debug)
+    tp_order_id = place_limit_tp(client, sym, side, qty, tp_price, position_id, debug)
 
     arm_log.log_arm_event(
         s["arm_id"], STRATEGY, sym, s["arm_time"], s["arm_price"],
